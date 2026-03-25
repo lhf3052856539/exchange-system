@@ -1,0 +1,16 @@
+# 忽略敏感文件
+.env
+node_modules/
+*.log
+.DS_Store
+
+# 编译产物
+cache/
+artifacts/
+typechain-types/
+
+# 部署信息（包含私钥等敏感信息）
+deployment-info.json
+
+# 但保留示例文件
+!.env.example

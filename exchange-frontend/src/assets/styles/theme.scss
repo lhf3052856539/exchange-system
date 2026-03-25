@@ -1,0 +1,62 @@
+// src/assets/styles/theme.scss
+@import './variables.scss';
+
+// 提案状态主题色
+.dao-status-theme {
+  &.pending {
+    background-color: $info-color;
+    color: #fff;
+  }
+
+  &.active {
+    background-color: $warning-color;
+    color: #fff;
+  }
+
+  &.succeeded {
+    background-color: $success-color;
+    color: #fff;
+  }
+
+  &.failed {
+    background-color: $danger-color;
+    color: #fff;
+  }
+
+  &.queued {
+    background-color: $primary-color;
+    color: #fff;
+  }
+
+  &.executed {
+    background-color: $success-color;
+    color: #fff;
+  }
+
+  &.cancelled {
+    background-color: $info-color;
+    color: #fff;
+  }
+}
+
+// 投票进度条主题
+.vote-progress {
+  &--yes {
+    background-color: $success-color;
+  }
+
+  &--no {
+    background-color: $danger-color;
+  }
+}
+
+// 暗色主题支持（可选）
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg-page: #1a1a1a;
+    --bg-white: #2d2d2d;
+    --text-primary: #e0e0e0;
+    --text-regular: #b0b0b0;
+    --border-color: #444;
+  }
+}

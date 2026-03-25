@@ -1,0 +1,59 @@
+// src/assets/styles/variables.scss
+// 主题色
+$primary-color: #409EFF;
+$success-color: #67C23A;
+$warning-color: #E6A23C;
+$danger-color: #F56C6C;
+$info-color: #909399;
+
+// 文字颜色
+$text-primary: #303133;
+$text-regular: #606266;
+$text-secondary: #909399;
+$text-placeholder: #C0C4CC;
+
+// 背景色
+$bg-page: #f5f7fa;
+$bg-white: #ffffff;
+$bg-dark: #141414;
+
+// 边框颜色
+$border-color: #DCDFE6;
+$border-light: #EBEEF5;
+
+// 字体大小
+$font-xs: 12px;
+$font-sm: 14px;
+$font-md: 16px;
+$font-lg: 18px;
+$font-xl:20px;
+
+// 间距
+$spacing-xs: 4px;
+$spacing-sm: 8px;
+$spacing-md: 12px;
+$spacing-lg: 16px;
+$spacing-xl:24px;
+
+// 圆角
+$radius-small:2px;
+$radius-base: 4px;
+$radius-large: 8px;
+$radius-round: 50%;
+
+// 阴影
+$shadow-light: 0 2px 8px rgba(0, 0, 0, 0.08);
+$shadow-base: 0 2px 12px 0 rgba(0, 0, 0, 0.1);
+$shadow-dark: 0 4px 16px 0 rgba(0, 0, 0, 0.2);
+
+// 过渡
+$transition-base: all 0.3s ease;
+$transition-fast: all 0.2s ease;
+$transition-slow: all 0.5s ease;
+
+// Z-index
+$z-index-normal: 1;
+$z-index-top: 1000;
+$z-index-popper: 2000;
+$z-index-overlay: 3000;
+$z-index-modal: 4000;

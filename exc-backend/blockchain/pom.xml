@@ -1,0 +1,125 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.mnnu</groupId>
+    <artifactId>blockchain</artifactId>
+    <version>1.0.0</version>
+    <dependencies>
+        <dependency>
+            <groupId>org.testng</groupId>
+            <artifactId>testng</artifactId>
+            <version>RELEASE</version>
+            <scope>compile</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-context</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.web3j</groupId>
+            <artifactId>core</artifactId>
+            <version>4.10.0</version>
+        </dependency>
+
+        <dependency>
+            <groupId>javax.annotation</groupId>
+            <artifactId>javax.annotation-api</artifactId>
+            <version>1.3.2</version>
+        </dependency>
+        <!-- Knife4j -->
+        <dependency>
+            <groupId>org.springdoc</groupId>
+            <artifactId>springdoc-openapi-ui</artifactId>
+            <version>1.8.0</version>
+        </dependency>
+    </dependencies>
+
+    <parent>
+        <groupId>com.mnnu</groupId>
+        <artifactId>exc-backend</artifactId>
+        <version>1.0.0</version>
+    </parent>
+
+    <properties>
+        <maven.compiler.source>17</maven.compiler.source>
+        <maven.compiler.target>17</maven.compiler.target>
+    </properties>
+
+    <build>
+        <plugins>
+            <!-- Web3j 智能合约代码生成插件 -->
+            <plugin>
+                <groupId>org.web3j</groupId>
+                <artifactId>web3j-maven-plugin</artifactId>
+                <version>4.10.0</version>
+                <configuration addBinFiles="true">
+                    <sourceType>SOLIDITY</sourceType>
+                    <solcExecutable>${project.basedir}/solc/solc-windows.exe</solcExecutable>
+                    <!-- 指定 Solidity 合约文件所在的目录 -->
+                    <soliditySourceFiles>
+                        <directory>${project.basedir}/src/main/solidity/contracts</directory>
+                        <includes>
+                            <include>**/*.sol</include>
+                        </includes>
+                        <excludes>
+                            <exclude>**/node_modules/**</exclude>
+                        </excludes>
+                    </soliditySourceFiles>
+                    <!-- 指定生成的 Java 类的包名 -->
+                    <generatedPackageName>com.mnnu.contract</generatedPackageName>
+                    <!-- 指定生成的 Java 文件的输出目录 -->
+                    <outputDirectory>
+                        <java>${project.build.directory}/generated-sources/web3j</java>
+                    </outputDirectory>
+                    <!-- 阻止插件在每次构建时都重新生成文件，除非合约有变动 -->
+                    <skip>false</skip>
+                    <addJavaFiles>true</addJavaFiles>
+
+
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>generate-contracts</id>
+                        <goals>
+                            <goal>generate-sources</goal>
+                        </goals>
+                        <phase>generate-sources</phase>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <!--
+              非常重要的一步：
+              这个插件会将上面 web3j 插件生成的代码目录 (target/generated-sources/web3j)
+              添加为项目的源码目录，这样 IntelliJ IDEA 和 Maven 才能识别和编译生成的 Java 类。
+            -->
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>build-helper-maven-plugin</artifactId>
+                <version>3.3.0</version>
+                <executions>
+                    <execution>
+                        <id>add-source</id>
+                        <phase>generate-sources</phase>
+                        <goals>
+                            <goal>add-source</goal>
+                        </goals>
+                        <configuration>
+                            <sources>
+                                <source>${project.build.directory}/generated-sources/web3j</source>
+                            </sources>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+
+</project>

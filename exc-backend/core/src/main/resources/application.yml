@@ -1,0 +1,83 @@
+server:
+  port: 8096
+
+spring:
+  application:
+    name: exchange-system
+  datasource:
+    url: jdbc:mysql://127.0.0.1:3306/exchange_db?useUnicode=true&useSSL=false&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+    username: root
+    password: 123456
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    type: com.alibaba.druid.pool.DruidDataSource
+    druid:
+      name: DruidDataSource
+      initial-size: 1
+      min-idle: 1
+      max-active: 20
+      async-init: true
+      max-wait: 6000
+      time-between-eviction-runs-millis: 60000
+      min-evictable-idle-time-millis: 300000
+      max-evictable-idle-time-millis: 900000
+      validation-query: SELECT 1
+      test-while-idle: true
+      test-on-borrow: false
+      test-on-return: false
+      pool-prepared-statements: true
+      max-pool-prepared-statement-per-connection-size: 20
+      connection-init-sqls: SET NAMES utf8mb4 COLLATE utf8mb4_0900_ai_ci;
+      filters: stat
+  redis:
+    host: 127.0.0.1
+    port: 6379
+    password: 01star
+    database: 0
+    # Redisson 连接池配置
+    redisson:
+      connection-pool-size: 64
+      idle-connection-timeout: 10000
+      connect-timeout: 10000
+      timeout: 3000
+
+# Web3j 配置
+web3j:
+  node-url: https://eth-sepolia.g.alchemy.com/v2/eh_dEB9V7MnEnkpfNh5xq
+  network-id: 11155111
+  private-key: c20eea3133007bbf18c1b2221029695e9ba385930864e8c2f5e7489e2c3d9ec3
+  gas-price: 20000000000
+  gas-limit: 4000000
+  ens:
+    enabled: false  # 禁用ENS解析
+
+# 合约地址配置
+contract:
+  exchange:
+    address: '0xB52E3Bd90284892F61015d22369225d2457FAeF1'
+  exth:
+    address: '0xDdea6e80dF326B46F8de11CF92b40Ac86e388d3d'
+  usdt:
+    address: '0xc4ccaFe469127E9477168d89DF512dBDaBF40bF8'
+  rnb:
+    address: '0x7dF47D293578b4cCDBD099e33BfE7c2938277A5B'
+  gbp:
+    address: '0xBfBe95EBA396B996851c5a388CAc6b41186a2B37'
+  treasure:
+    address: '0x327DFa111463D5f64c6c41F39Fb0B9Bc3cb56A8c'
+  dao:
+    address: '0xC32581fC33aa2C0121A6439851E92131C3199faa'
+  timelock:
+    address: '0x6AcEa9B7EA815EF25f5B4D36e17B0BB6930d2CFF'
+  airdrop:
+    address: '0x3c554956897AeeF876269E62f877aE1579Aea2CC'
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+  global-config:
+    db-config:
+      id-type: auto
+      logic-delete-field: deleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+
