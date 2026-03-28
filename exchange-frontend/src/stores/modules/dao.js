@@ -187,7 +187,7 @@ export const useDaoStore = defineStore('dao', {
         /**
          * 执行提案
          */
-        async submitExecute(proposalId, eta) {
+        async submitExecute(proposalId) {
             const walletStore = useWalletStore()
             const address = walletStore.address
 
@@ -195,7 +195,7 @@ export const useDaoStore = defineStore('dao', {
                 throw new Error('Wallet not connected')
             }
 
-            const res = await executeProposal(address, proposalId, eta)
+            const res = await executeProposal(address, proposalId)
             await this.loadProposalDetail(proposalId)
             return res.data
         },

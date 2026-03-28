@@ -77,6 +77,13 @@
           <el-descriptions-item label="剩余时间" :span="2">
             {{ getTimeRemaining(currentProposal?.deadline) }}
           </el-descriptions-item>
+          <el-descriptions-item
+              v-if="currentProposal?.state === ProposalState.Queued"
+              label="公示期剩余"
+              :span="2"
+          >
+            <el-tag type="warning">{{ queueTimeRemaining }}</el-tag>
+          </el-descriptions-item>
         </el-descriptions>
 
         <!-- 提案描述 -->
@@ -180,6 +187,7 @@ import { useDao } from '@/composables/useDao'
 import { useWalletStore } from '@/stores'
 import { ethers } from 'ethers'
 import web3Util from '@/utils/web3'
+import { ProposalState } from '@/stores/modules/dao'
 
 const route = useRoute()
 const router = useRouter()
@@ -209,24 +217,35 @@ const {
 
 const proposalId = ref(route.params.id)
 
-// ProposalState 枚举
-const ProposalState = {
-  Pending: 0,
-  Active: 1,
-  Canceled: 2,
-  Defeated: 3,
-  Succeeded: 4,
-  Queued: 5,
-  Expired: 6,
-  Executed: 7
-}
-
 const yesPercentage = computed(() => {
   const yes = Number(currentProposal.value?.yesVotes) || 0
   const no = Number(currentProposal.value?.noVotes) || 0
   const total = yes + no
   if (total === 0) return 0
   return Math.round((yes / total) * 100)
+})
+
+// 添加公示期倒计时计算
+const queueTimeRemaining = computed(() => {
+  if (!currentProposal.value?.eta || currentProposal.value.eta <= 0) return '暂无'
+
+  const now = Math.floor(Date.now() / 1000)
+  const eta = currentProposal.value.eta.toNumber ? currentProposal.value.eta.toNumber() : Number(currentProposal.value.eta)
+
+  if (eta <= now) return '已可执行'
+
+  const diff = eta - now
+  const hours = Math.floor(diff / 3600)
+  const minutes = Math.floor((diff % 3600) / 60)
+  const seconds = diff % 60
+
+  if (hours > 0) {
+    return `${hours}小时${minutes}分钟`
+  } else if (minutes > 0) {
+    return `${minutes}分钟${seconds}秒`
+  } else {
+    return `${seconds}秒`
+  }
 })
 
 const canVote = computed(() => {

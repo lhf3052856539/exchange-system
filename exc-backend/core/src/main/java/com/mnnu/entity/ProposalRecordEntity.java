@@ -10,7 +10,6 @@ public class ProposalRecordEntity {
     private Long id;
     private String proposalId;        // 链上ID
     private String txHash;
-    private String title;
     private String description;
     private String proposer;
     private String targetContract;

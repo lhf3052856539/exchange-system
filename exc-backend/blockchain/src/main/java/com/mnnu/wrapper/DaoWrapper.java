@@ -1,11 +1,13 @@
 package com.mnnu.wrapper;
 
 
+import io.reactivex.Flowable;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.web3j.model.Dao;
 import org.web3j.protocol.Web3j;
+import org.web3j.protocol.core.DefaultBlockParameterName;
 import org.web3j.protocol.core.methods.response.TransactionReceipt;
 import org.web3j.tuples.generated.Tuple11;
 import org.web3j.tuples.generated.Tuple12;
@@ -81,10 +83,46 @@ public class DaoWrapper extends BaseWrapper{
     /**
      * 执行提案
      */
-    public String executeProposal(BigInteger proposalId, BigInteger eta) throws Exception {
-        return contract.execute(proposalId, eta)
-                .send()
-                .getTransactionHash();
+    public String executeProposal(BigInteger proposalId) throws Exception {
+        // ✅ 先查询提案信息获取 eta
+        ProposalInfo info = getProposal(proposalId);
+
+        log.info("=== Execute Proposal {} ===", proposalId);
+        log.info("eta: {}", info.eta);
+        log.info("target: {}", info.targetContract);
+        log.info("value: {}", info.value);
+        log.info("callData length: {}", info.callData != null ? info.callData.length : 0);
+        if (info.callData != null && info.callData.length > 0) {
+            log.info("callData: 0x{}", bytesToHex(info.callData));
+        }
+
+        if (info.eta == null || info.eta.compareTo(BigInteger.ZERO) <= 0) {
+            throw new Exception("Proposal eta not set");
+        }
+
+        // ✅ 传递 proposalId 和 wei（0，因为不需要发送以太币）
+        try {
+            return contract.execute(proposalId, BigInteger.ZERO)
+                    .send()
+                    .getTransactionHash();
+        } catch (Exception e) {
+            log.error("Execute proposal failed: {}", e.getMessage());
+            log.error("Transaction details:");
+            log.error("  - proposalId: {}", proposalId);
+            log.error("  - target: {}", info.targetContract);
+            log.error("  - value: {}", info.value);
+            log.error("  - eta: {}", info.eta);
+            throw e;
+        }
+    }
+
+    // 添加一个辅助方法将字节数组转换为十六进制字符串
+    private String bytesToHex(byte[] bytes) {
+        StringBuilder sb = new StringBuilder();
+        for (byte b : bytes) {
+            sb.append(String.format("%02x", b));
+        }
+        return sb.toString();
     }
 
     /**
@@ -115,15 +153,17 @@ public class DaoWrapper extends BaseWrapper{
                 result.component3(),   // yesVotes
                 result.component4(),   // noVotes
                 result.component5() != null && result.component5(),   // executed
-                result.component6() != null && result.component6(),   // queued
+                result.component6() != null && result.component6(),   // canceled
                 result.component7(),   // targetContract
                 result.component8(),   // value
-                result.component9(),   // callData (or signatures)
-                result.component10(),  // additional data (or targets)
-                result.component11(),  // eta
-                result.component12()   // snapshotBlock
+                result.component9(),   // callData
+                result.component10(),  // timelockId
+                result.component12(),  // ✅ eta (component12)
+                result.component11()   // ✅ snapshotBlock (component11)
         );
     }
+
+
     /**
      * 查询是否已投票
      */
@@ -156,8 +196,22 @@ public class DaoWrapper extends BaseWrapper{
     }
 
     /**
-     * 提案信息
+     * 监听 ProposalExecuted 事件
      */
+    public Flowable<Dao.ProposalExecutedEventResponse> proposalExecutedEventFlowable(
+            DefaultBlockParameterName startBlock,
+            DefaultBlockParameterName endBlock) {
+        return contract.proposalExecutedEventFlowable(startBlock, endBlock);
+    }
+
+    /**
+     * 获取交易收据中的 ProposalExecuted 事件
+     */
+    public List<Dao.ProposalExecutedEventResponse> getProposalExecutedEvents(TransactionReceipt receipt) {
+        return Dao.getProposalExecutedEvents(receipt);
+    }
+
+
     /**
      * 提案信息
      */

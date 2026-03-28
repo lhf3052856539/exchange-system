@@ -3,13 +3,29 @@ import request from '@/utils/request'
 
 /**
  * 领取空投
- * @param {string} address - 钱包地址
+ * @param {string} address - 钱包地址（从 token 获取）
+ * @param {string|number} amount - 领取数量
+ * @param {string[]} merkleProof - 默克尔证明（十六进制字符串数组）
  */
-export function claimAirdrop(address) {
+export function claimAirdrop(address, amount, merkleProof) {
+    console.log('📤 Claim airdrop request:', {
+        address,
+        amount,
+        merkleProof,
+        proofLength: merkleProof?.length,
+        firstProof: merkleProof?.[0]
+    })
+
     return request({
         url: '/airdrop/claim',
         method: 'post',
-        params: { address }
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        data: {
+            amount: parseInt(amount), // 转换为整数
+            merkleProof
+        }
     })
 }
 

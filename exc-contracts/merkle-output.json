@@ -1,0 +1,25 @@
+{
+  "merkleRoot": "0xf4aa42cb1bd92c6801235dda3a3ba1e96e719e953dd63f2e0d3e4ee9a9a57572",
+  "claims": {
+    "0x6f5C2cc9eF8a419dF1B1EDd5aC604780d6575495": {
+      "amount": "100000000",
+      "proof": [
+        "0x0482918304cda53a289acecc63f98a77423af0b7ee8640bf59d89e855f32c666",
+        "0x6e8d6f99d2726c2178c86a0a525744695b8a60ad1ad394c1858f19e9c4c5afe9"
+      ]
+    },
+    "0x69Fd5E02a6442aB46F088b616C3AC1Ab71a900a0": {
+      "amount": "150000000",
+      "proof": [
+        "0xec9bb08c2af952614ca4a710da38587038aba26e8f7167910472a6f713ac18f1",
+        "0x6e8d6f99d2726c2178c86a0a525744695b8a60ad1ad394c1858f19e9c4c5afe9"
+      ]
+    },
+    "0xD1a1669D5Ba80AB717928f3018d7AFa7D1aee496": {
+      "amount": "880000000",
+      "proof": [
+        "0x6ae2548c37bf192b1001f633d2a1a0fe3a464b176b0c8109d7f807fc35a75ed2"
+      ]
+    }
+  }
+}

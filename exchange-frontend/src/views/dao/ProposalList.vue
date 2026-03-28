@@ -324,7 +324,7 @@ function handleSizeChange(size) {
       const contract = new ethers.Contract(exthAddress, exthABI, provider)
       const votes = await contract.getVotes(walletStore.address)
 
-      votingPowerLocal.value = Number(ethers.formatEther(votes))
+      votingPowerLocal.value = Number(ethers.formatUnits(votes, 6))
     } catch (error) {
       console.error('Failed to fetch voting power:', error)
     }

@@ -2,7 +2,7 @@
 pragma solidity ^0.8.21;
 
 import './EXTH.sol';
-import './Timelock.sol' as TimelockContract;z
+import './Timelock.sol' as TimelockContract;
 
 
 /**

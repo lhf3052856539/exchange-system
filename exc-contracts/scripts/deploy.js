@@ -62,7 +62,7 @@ async function main() {
     console.log("Dao deployed to:", await dao.getAddress());
 
     // 从 Timelock 合约中读取 PROPOSER_ROLE 的哈希值
-    const PROPOSER_ROLE = await timelock.DEFAULT_ADMIN_ROLE();
+    const PROPOSER_ROLE = ethers.keccak256(ethers.toUtf8Bytes("PROPOSER_ROLE"));
     const daoAddress = await dao.getAddress();
 
     // 授予 Dao 合约 PROPOSER_ROLE 角色
@@ -70,6 +70,14 @@ async function main() {
     const grantTx = await timelock.grantRole(PROPOSER_ROLE, daoAddress);
     await grantTx.wait(1); // 等待交易被确认
     console.log("-> PROPOSER_ROLE granted to Dao contract.");
+
+    // ✅ 新增：授予 DAO 合约 EXECUTOR_ROLE（让它能执行提案）
+    console.log("\nGranting EXECUTOR_ROLE to Dao contract...");
+    const EXECUTOR_ROLE = ethers.keccak256(ethers.toUtf8Bytes("EXECUTOR_ROLE"));
+    const grantExecutorTx = await timelock.grantRole(EXECUTOR_ROLE, daoAddress);
+    await grantExecutorTx.wait(1);
+    console.log("-> EXECUTOR_ROLE granted to Dao contract.");
+
 
 
     // 8. 部署 Exchange 合约

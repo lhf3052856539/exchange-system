@@ -90,13 +90,12 @@ export function queueProposal(address, proposalId) {
  * 执行提案
  * @param {string} address - 用户地址
  * @param {number} proposalId - 提案 ID
- * @param {number} eta - 公示期执行时间
  */
-export function executeProposal(address, proposalId, eta) {
+export function executeProposal(address, proposalId) {
     return request({
         url: '/dao/proposal/execute',
         method: 'post',
-        params: { proposalId, eta }
+        params: { proposalId }
     })
 }
 

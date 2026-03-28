@@ -39,10 +39,9 @@ public interface DaoService {
     /**
      * 执行提案
      * @param proposalId 提案 ID
-     * @param eta 公示期执行时间
      * @return 交易哈希
      */
-    String executeProposal(BigInteger proposalId, BigInteger eta);
+    String executeProposal(BigInteger proposalId,BigInteger eta);
 
     /**
      * 取消提案

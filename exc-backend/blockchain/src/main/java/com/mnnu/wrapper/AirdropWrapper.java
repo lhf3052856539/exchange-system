@@ -24,10 +24,14 @@ public class AirdropWrapper extends BaseWrapper{
 
     private Airdrop contract;
 
+    private final EXTHWrapper exthWrapper;
+
     public AirdropWrapper(Web3j web3j, TransactionManager transactionManager,
-                          ContractGasProvider gasProvider) {
+                          ContractGasProvider gasProvider, EXTHWrapper exthWrapper) {
         super(web3j, transactionManager, gasProvider);
+        this.exthWrapper = exthWrapper;
     }
+
 
     @PostConstruct
     public void init() {
@@ -42,6 +46,23 @@ public class AirdropWrapper extends BaseWrapper{
         return contract.claim(amount, merkleProof)
                 .send()
                 .getTransactionHash();
+    }
+
+    /**
+     * 查询 Airdrop 合约的 EXTH 代币余额
+     */
+    public BigInteger getAirdropBalance() throws Exception {
+        try {
+            // 获取 Airdrop 合约地址
+            String airdropAddress = contract.getContractAddress();
+
+            // 使用 EXTH Wrapper 查询余额
+            return exthWrapper.balanceOf(airdropAddress);
+
+        } catch (Exception e) {
+            log.error("Failed to get airdrop balance", e);
+            throw e;
+        }
     }
 
 

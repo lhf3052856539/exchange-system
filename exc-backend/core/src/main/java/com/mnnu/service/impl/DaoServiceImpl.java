@@ -139,6 +139,19 @@ public class DaoServiceImpl implements DaoService {
      * 将十六进制字符串转换为字节数组
      */
     private byte[] hexStringToByteArray(String s) {
+        if (s == null || s.isEmpty() || "0x".equals(s)) {
+            return new byte[0]; // 返回空数组而不是 null
+        }
+
+        // 移除 0x 前缀
+        if (s.startsWith("0x") || s.startsWith("0X")) {
+            s = s.substring(2);
+        }
+
+        if (s.isEmpty()) {
+            return new byte[0];
+        }
+
         int len = s.length();
         byte[] data = new byte[len / 2];
         for (int i = 0; i < len; i += 2) {
@@ -163,7 +176,39 @@ public class DaoServiceImpl implements DaoService {
     public String queueProposal(BigInteger proposalId) {
         try {
             log.info("Queueing proposal {}", proposalId);
-            return daoWrapper.queueProposal(proposalId);
+            String txHash = daoWrapper.queueProposal(proposalId);
+
+            // ✅ 异步更新数据库中的 eta 和状态
+            CompletableFuture.runAsync(() -> {
+                try {
+                    // 等待几秒让链上确认
+                    Thread.sleep(3000);
+
+                    // 从链上获取最新的提案信息
+                    DaoWrapper.ProposalInfo proposalInfo = daoWrapper.getProposal(proposalId);
+
+                    if (proposalInfo.eta != null && proposalInfo.eta.compareTo(BigInteger.ZERO) > 0) {
+                        // 查询数据库记录
+                        LambdaQueryWrapper<ProposalRecordEntity> wrapper = new LambdaQueryWrapper<>();
+                        wrapper.eq(ProposalRecordEntity::getProposalId, proposalId.toString());
+                        ProposalRecordEntity dbRecord = proposalRecordMapper.selectOne(wrapper);
+
+                        if (dbRecord != null) {
+                            // 更新 eta 和状态
+                            dbRecord.setEta(proposalInfo.eta.longValue());
+                            dbRecord.setStatus(1); // 公示中
+                            dbRecord.setUpdatedAt(LocalDateTime.now());
+
+                            proposalRecordMapper.updateById(dbRecord);
+                            log.info("✅ Updated proposal {} with eta: {}", proposalId, proposalInfo.eta);
+                        }
+                    }
+                } catch (Exception e) {
+                    log.warn("Failed to update proposal eta after queue: {}", e.getMessage());
+                }
+            });
+
+            return txHash;
         } catch (Exception e) {
             log.error("Failed to queue proposal {}", proposalId, e);
             throw new BusinessException("加入公示期失败：" + e.getMessage());
@@ -174,12 +219,89 @@ public class DaoServiceImpl implements DaoService {
     public String executeProposal(BigInteger proposalId, BigInteger eta) {
         try {
             log.info("Executing proposal {} with eta {}", proposalId, eta);
-            return daoWrapper.executeProposal(proposalId, eta);
+
+            // ✅ 先从链上查询最新的提案信息，获取正确的 eta
+            DaoWrapper.ProposalInfo proposalInfo = daoWrapper.getProposal(proposalId);
+
+            if (proposalInfo.eta == null || proposalInfo.eta.compareTo(BigInteger.ZERO) <= 0) {
+                throw new BusinessException("提案未设置公示期结束时间 (eta)，请先加入公示期");
+            }
+
+            // ✅ 检查当前时间和 eta
+            BigInteger currentTime = BigInteger.valueOf(System.currentTimeMillis() / 1000);
+            log.info("Current time: {}, Proposal eta: {}", currentTime, proposalInfo.eta);
+
+            if (currentTime.compareTo(proposalInfo.eta) < 0) {
+                long remaining = proposalInfo.eta.longValue() - currentTime.longValue();
+                long hours = remaining / 3600;
+                long minutes = (remaining % 3600) / 60;
+                long seconds = remaining % 60;
+                throw new BusinessException(String.format(
+                        "公示期还未结束！剩余时间：%d 小时%d分钟%d秒",
+                        hours, minutes, seconds
+                ));
+            }
+
+            // ✅ 检查提案状态
+            BigInteger state = daoWrapper.getProposalState(proposalId);
+            log.info("📋 Proposal {} state: {}", proposalId, state);
+            if (state.compareTo(BigInteger.valueOf(4)) != 0) {
+                throw new BusinessException("提案状态不正确，当前状态：" + state + "，需要状态：4（已入队列）");
+            }
+
+            // ✅ 记录目标合约信息
+            log.info("🎯 Target contract: {}", proposalInfo.targetContract);
+            log.info("💰 Value: {}", proposalInfo.value);
+            log.info("📝 CallData: 0x{}", bytesToHex(proposalInfo.callData));
+
+            // ✅ 执行提案
+            String txHash = daoWrapper.executeProposal(proposalId);
+
+            // ✅ 异步更新数据库状态
+            CompletableFuture.runAsync(() -> {
+                try {
+                    // 等待几秒让链上确认
+                    Thread.sleep(3000);
+
+                    // 查询数据库记录
+                    LambdaQueryWrapper<ProposalRecordEntity> wrapper = new LambdaQueryWrapper<>();
+                    wrapper.eq(ProposalRecordEntity::getProposalId, proposalId.toString());
+                    ProposalRecordEntity dbRecord = proposalRecordMapper.selectOne(wrapper);
+
+                    if (dbRecord != null) {
+                        // 更新状态为已执行
+                        dbRecord.setStatus(5); // 已执行
+                        dbRecord.setUpdatedAt(LocalDateTime.now());
+
+                        proposalRecordMapper.updateById(dbRecord);
+                        log.info("✅ Updated proposal {} status to executed", proposalId);
+                    }
+                } catch (Exception e) {
+                    log.warn("Failed to update proposal status after execute: {}", e.getMessage());
+                }
+            });
+
+            return txHash;
+        } catch (BusinessException e) {
+            throw e;
         } catch (Exception e) {
             log.error("Failed to execute proposal {}", proposalId, e);
             throw new BusinessException("执行提案失败：" + e.getMessage());
         }
     }
+
+    // 添加辅助方法
+    private String bytesToHex(byte[] bytes) {
+        if (bytes == null || bytes.length == 0) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder();
+        for (byte b : bytes) {
+            sb.append(String.format("%02x", b));
+        }
+        return sb.toString();
+    }
+
 
     @Override
     public String cancelProposal(BigInteger proposalId) {

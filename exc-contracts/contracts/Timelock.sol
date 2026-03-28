@@ -35,10 +35,10 @@ contract Timelock is AccessControl {
         minDelay = _minDelay;
 
         // --- 设置角色 ---
-        // 1. 部署者获得 ADMIN 角色，以便完成初始设置。
+        // 部署者获得 ADMIN 角色，以便完成初始设置。
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
 
-        // 3. 任何人 (`address(0)`) 都被授予执行者角色。这是安全的。
+        // 任何人 (`address(0)`) 都被授予执行者角色。这是安全的。
         _grantRole(EXECUTOR_ROLE, address(0));
     }
 

@@ -1,11 +1,10 @@
 package com.mnnu.apis;
+import com.mnnu.config.CurrentUser;
+import com.mnnu.dto.AirdropClaimRequest;
 import com.mnnu.dto.AirdropDTO;
 import com.mnnu.dto.AirdropInfoDTO;
 import com.mnnu.vo.JsonVO;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.*;
 
 import java.math.BigInteger;
 import java.util.List;
@@ -17,7 +16,8 @@ import java.util.List;
 public interface AirdropApi {
 
 
-    JsonVO<AirdropDTO> claimAirdrop(@RequestParam String address, BigInteger amount, List<byte[]> merkleProof);
+    JsonVO<AirdropDTO> claimAirdrop(@CurrentUser String address,
+                                    @RequestBody AirdropClaimRequest request);
 
 
     JsonVO<Boolean> hasClaimed(@RequestParam String address);

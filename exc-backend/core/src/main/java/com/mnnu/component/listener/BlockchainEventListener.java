@@ -4,17 +4,24 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mnnu.component.handler.CustomWebSocketHandler;
 import com.mnnu.constant.SystemConstants;
 import com.mnnu.dto.NotificationDTO;
+import com.mnnu.entity.AirdropEntity;
 import com.mnnu.entity.AirdropRecordEntity;
+import com.mnnu.mapper.AirdropMapper;
 import com.mnnu.mapper.AirdropRecordMapper;
 import com.mnnu.service.AirdropService;
 import com.mnnu.service.BlockchainService;
 import com.mnnu.service.NotificationService;
 import com.mnnu.service.TradeService;
 import com.mnnu.service.UserService;
+import com.mnnu.wrapper.AirdropWrapper;
+import com.mnnu.wrapper.DaoWrapper;
+import com.mnnu.wrapper.TreasureWrapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
+import org.web3j.protocol.Web3j;
 
 import java.math.BigDecimal;
 import java.math.BigInteger;
@@ -23,6 +30,8 @@ import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 区块链事件监听器
@@ -63,6 +72,36 @@ public class BlockchainEventListener {
     private final AirdropRecordMapper airdropRecordMapper;
 
     /**
+     * 空投数据访问接口
+     */
+    @Autowired
+    private AirdropMapper airdropMapper;
+
+    /**
+     * Web3j 客户端
+     */
+    @Autowired
+    private Web3j web3j;
+
+    /**
+     * 空投合约包装器
+     */
+    @Autowired
+    private AirdropWrapper airdropWrapper;
+
+    /**
+     * DAO 合约包装器
+     */
+    @Autowired
+    private DaoWrapper daoWrapper;
+
+    /**
+     * 财库合约包装器
+     */
+    @Autowired
+    private TreasureWrapper treasureWrapper;
+
+    /**
      * 处理区块链事件
      * - Transfer: 代币转账事件
      * - TradeMatched: 交易匹配事件
@@ -70,6 +109,7 @@ public class BlockchainEventListener {
      * - AirdropClaimed: 空投领取事件
      * - UserBlacklisted: 用户拉黑事件
      * - RewardDistributed: 奖励发放事件
+     * - ProposalExecuted: 提案执行事件
      */
 
     @RabbitListener(queues = SystemConstants.MQQueue.BLOCKCHAIN_EVENT)
@@ -101,6 +141,9 @@ public class BlockchainEventListener {
                     break;
                 case "RewardDistributed":
                     handleRewardEvent(event);
+                    break;
+                case "ProposalExecuted":
+                    handleProposalExecutedEvent(event);
                     break;
                 default:
                     log.warn("Unknown event type: {}", eventType);
@@ -222,6 +265,164 @@ public class BlockchainEventListener {
             log.error("Failed to process airdrop event", e);
         }
     }
+
+    /**
+     * 处理 DAO 提案执行事件（同步空投信息）
+     */
+    private void handleProposalExecutedEvent(Map<String, Object> event) {
+        try {
+            String proposalIdStr = (String) event.get("proposalId");
+            String txHash = (String) event.get("txHash");
+
+            log.info("Processing ProposalExecuted event: proposalId={}, txHash={}", proposalIdStr, txHash);
+
+            // 异步执行，避免阻塞
+            CompletableFuture.runAsync(() -> {
+                try {
+                    // 等待几秒让区块确认
+                    TimeUnit.SECONDS.sleep(3);
+
+                    BigInteger proposalId = new BigInteger(proposalIdStr);
+
+                    // 从链上查询提案详情
+                    DaoWrapper.ProposalInfo proposalInfo = daoWrapper.getProposal(proposalId);
+                    String targetContract = proposalInfo.targetContract;
+
+                    log.info("Proposal {} executed, target contract: {}", proposalId, targetContract);
+
+                    // 🔍 调试：打印所有合约地址
+                    log.info("TreasureWrapper status: {}, address: {}",
+                            treasureWrapper != null ? "initialized" : "null",
+                            treasureWrapper != null ? treasureWrapper.getContractAddress() : "N/A");
+                    log.info("AirdropWrapper status: {}, address: {}",
+                            airdropWrapper != null ? "initialized" : "null",
+                            airdropWrapper != null ? airdropWrapper.getContractAddress() : "N/A");
+
+                    // ✅ 检查是否是 Treasure 金库合约向空投合约发放代币
+                    if (treasureWrapper != null && targetContract != null &&
+                            targetContract.equalsIgnoreCase(treasureWrapper.getContractAddress())) {
+
+                        log.info("✅ 检测到 Treasure 金库提案执行，开始同步空投信息...");
+
+                        // 等待片刻让 Treasure 合约完成转账
+                        TimeUnit.SECONDS.sleep(2);
+
+                        syncAirdropInfoFromChain();
+                        return;
+                    }
+
+                    // ✅ 检查是否是空投合约的提案
+                    if (airdropWrapper != null && targetContract != null &&
+                            targetContract.equalsIgnoreCase(airdropWrapper.getContractAddress())) {
+
+                        log.info("✅ 检测到空投合约提案执行，开始同步链上数据...");
+                        syncAirdropInfoFromChain();
+                        return;
+                    }
+
+                    // ✅ 检查 callData 是否包含空投相关方法调用
+                    if (proposalInfo.callData != null && proposalInfo.callData.length > 0) {
+                        String callDataHex = bytesToHex(proposalInfo.callData);
+                        log.info("Proposal {} callData: 0x{}", proposalId, callDataHex);
+
+                        // 检查是否包含代币转移相关的方法签名
+                        // reclaimTokens(): 0x44004cc1
+                        // transfer(address,uint256): 0xa9059cbb
+                        // transferFrom(address,address,uint256): 0x23b872dd
+                        if (callDataHex.startsWith("44004cc1") ||
+                                callDataHex.startsWith("a9059cbb") ||
+                                callDataHex.startsWith("23b872dd")) {
+
+                            log.info("✅ 检测到代币回收/转移方法调用，同步空投信息...");
+                            TimeUnit.SECONDS.sleep(2);
+                            syncAirdropInfoFromChain();
+                            return;
+                        }
+                    }
+
+                    log.warn("⚠️ 提案执行完成，但未匹配到任何空投相关操作 (proposalId={}, targetContract={})",
+                            proposalId, targetContract);
+
+                } catch (Exception e) {
+                    log.error("Failed to process proposal executed event", e);
+                }
+            });
+
+        } catch (Exception e) {
+            log.error("Failed to process proposal executed event", e);
+        }
+    }
+
+    /**
+     * 字节数组转十六进制字符串
+     */
+    private String bytesToHex(byte[] bytes) {
+        StringBuilder sb = new StringBuilder();
+        for (byte b : bytes) {
+            sb.append(String.format("%02x", b));
+        }
+        return sb.toString();
+    }
+
+
+    /**
+     * 从链上同步空投信息到数据库
+     */
+    private void syncAirdropInfoFromChain() {
+        try {
+            if (airdropWrapper == null) {
+                log.warn("AirdropWrapper 未初始化，跳过同步");
+                return;
+            }
+
+            // 1. 查询 Airdrop 合约的 EXTH 代币余额
+            java.math.BigInteger balance = airdropWrapper.getAirdropBalance();
+            BigDecimal totalAmount = new BigDecimal(balance).divide(new BigDecimal(java.math.BigInteger.TEN.pow(6)));
+
+            log.info("Airdrop 合约余额：{} EXTH", totalAmount);
+
+            // 2. 每个地址可领取金额（固定值）
+            BigDecimal perAddressAmount = new BigDecimal("1000");
+
+            // 3. 创建或更新空投配置
+            AirdropEntity latest = airdropMapper.selectLatest();
+
+            if (latest == null || !Boolean.TRUE.equals(latest.getIsActive())) {
+                // 创建新的空投配置
+                AirdropEntity airdrop = new AirdropEntity();
+                airdrop.setAddress("0x0000000000000000000000000000000000000000");
+                airdrop.setTotalAmount(totalAmount);
+                airdrop.setPerAddressAmount(perAddressAmount);
+                airdrop.setIsActive(true);
+                airdrop.setStartTime(LocalDateTime.now());
+                airdrop.setCreateTime(LocalDateTime.now());
+
+                airdropMapper.insert(airdrop);
+                log.info("✅ 已创建新的空投配置：总金额={}, 每地址={}", totalAmount, perAddressAmount);
+            } else {
+                // 更新现有配置
+                latest.setTotalAmount(totalAmount.add(latest.getTotalAmount()));
+                airdropMapper.updateById(latest);
+                log.info("✅ 已更新空投配置：新增总金额={}, 累计={}", totalAmount, latest.getTotalAmount());
+            }
+
+            // 4. 发送全局通知
+            Map<String, Object> notification = new HashMap<>();
+            notification.put("type", "airdrop_activated");
+            notification.put("totalAmount", totalAmount);
+            notification.put("perAddress", perAddressAmount);
+            notification.put("timestamp", System.currentTimeMillis());
+
+            String message = objectMapper.writeValueAsString(notification);
+            CustomWebSocketHandler.broadcast(message);
+
+            log.info("已广播空投激活通知到所有在线用户");
+
+        } catch (Exception e) {
+            log.error("同步空投信息失败", e);
+        }
+    }
+
     /**
      * 处理用户拉黑事件
      */

@@ -59,12 +59,13 @@ public class DaoController implements DaoApi {
     @PostMapping("/proposal/execute")
     public JsonVO<String> executeProposal(
             @RequestParam BigInteger proposalId,
-            @RequestParam BigInteger eta
+            @RequestParam(required = false) BigInteger eta
     ) {
-        log.info("Execute proposal {} with eta: {}", proposalId, eta);
-        String txHash = daoService.executeProposal(proposalId, eta);
+        log.info("Execute proposal: {}, eta (ignored): {}", proposalId);
+        String txHash = daoService.executeProposal(proposalId,eta);
         return JsonVO.success(txHash);
     }
+
 
     @Override
     @PostMapping("/proposal/cancel")

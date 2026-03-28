@@ -15,11 +15,13 @@ export const useAirdropStore = defineStore('airdrop', {
     }),
 
     getters: {
-        fixedAmount: (state) => state.airdropInfo?.fixedAmount || 0,
-        totalAirdropAmount: (state) => state.airdropInfo?.totalAirdropAmount || 0,
+        fixedAmount: (state) => state.airdropInfo?.perAddress || 0,
+        totalAirdropAmount: (state) => state.airdropInfo?.totalAirdrop || 0,
         claimedAmount: (state) => state.airdropInfo?.claimedAmount || 0,
-        remainingAmount: (state) => state.airdropInfo?.remainingAmount || 0
+        remainingAmount: (state) => state.airdropInfo?.remainingAmount || 0,
+        isActive: (state) => state.airdropInfo && state.airdropInfo.totalAirdrop > 0
     },
+
 
     actions: {
         async checkClaimedStatus() {
@@ -53,7 +55,13 @@ export const useAirdropStore = defineStore('airdrop', {
                 }
 
                 const res = await getAirdropInfo(address)
-                this.airdropInfo = res.data
+                console.log('📡 Backend response:', res)
+                console.log('📦 Airdrop data:', res)
+
+                // res 已经是数据本身了，不需要再访问 .data
+                this.airdropInfo = res
+
+                console.log('✅ Store airdropInfo set to:', this.airdropInfo)
             } catch (error) {
                 console.error('Failed to fetch airdrop info:', error)
                 throw error

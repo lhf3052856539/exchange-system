@@ -1,10 +1,13 @@
 // src/composables/useAirdrop.js
 import { ref, computed } from 'vue'
 import { ElMessage } from 'element-plus'
-import { useAirdropStore } from '@/stores'
+import { useAirdropStore } from '@/stores/modules/airdrop'
+import { useWalletStore } from '@/stores/modules/wallet'
+import { claimAirdrop as claimAirdropApi } from '@/api/airdrop'
 
 export function useAirdrop() {
     const airdropStore = useAirdropStore()
+    const walletStore = useWalletStore()
     const processing = ref(false)
 
     const airdropInfo = computed(() => airdropStore.airdropInfo)
@@ -31,27 +34,40 @@ export function useAirdrop() {
         }
     }
 
-    async function claim() {
+    async function claim(amount, merkleProof) {
         if (processing.value) return
 
         processing.value = true
 
         try {
-            const result = await airdropStore.claim()
+            const address = walletStore.address
+
+            if (!address) {
+                throw new Error('钱包未连接')
+            }
+
+            const result = await claimAirdropApi(address, amount.toString(), merkleProof)
+
+            await airdropStore.fetchAirdropInfo()
+            await airdropStore.checkClaimedStatus()
+
             ElMessage.success('空投领取成功！')
-            return result
+            return result.data
         } catch (error) {
             console.error('Claim failed:', error)
 
-            // 显示具体的错误信息
             let errorMsg = '领取失败'
-            if (error.message) {
+            if (error.response?.data?.message) {
+                errorMsg = error.response.data.message
+            } else if (error.message) {
                 if (error.message.includes('No active airdrop')) {
                     errorMsg = '当前没有活跃的空投活动'
                 } else if (error.message.includes('already claimed')) {
                     errorMsg = '您已经领取过空投了'
                 } else if (error.message.includes('insufficient')) {
                     errorMsg = '空投池余额不足'
+                } else if (error.message.includes('not in whitelist')) {
+                    errorMsg = '您不在空投白名单中'
                 } else {
                     errorMsg = error.message
                 }
@@ -63,6 +79,7 @@ export function useAirdrop() {
             processing.value = false
         }
     }
+
     return {
         airdropInfo,
         hasClaimedStatus,

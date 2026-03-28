@@ -45,27 +45,28 @@ public class AirdropServiceImpl implements AirdropService {
             throw new BusinessException("No active airdrop available");
         }
 
-        // 创建领取记录
+        // 创建领取记录（Merkle 模式下金额由链上验证）
         AirdropEntity record = new AirdropEntity();
         record.setAddress(address);
-        record.setAmount(airdrop.getPerAddressAmount());
+        record.setAmount(BigDecimal.ZERO); // 金额为 0，实际由链上控制
         record.setHasClaimed(true);
         record.setClaimTime(LocalDateTime.now());
         record.setCreateTime(LocalDateTime.now());
 
         airdropMapper.insert(record);
 
-        // 调用链上空投合约
+        // 调用链上空投合约（Merkle 验证在链上进行）
         try {
-            blockchainService.claimAirdropOnChain(address, amount,merkleProof);
+            blockchainService.claimAirdropOnChain(address, amount, merkleProof);
         } catch (Exception e) {
             log.error("Failed to claim airdrop on chain", e);
             throw new BusinessException("Failed to claim airdrop on chain: " + e.getMessage());
         }
 
-        log.info("Airdrop claimed successfully: {}", address);
+        log.info("Airdrop claimed successfully via Merkle proof: {}", address);
         return convertToDTO(record);
     }
+
 
     /**
      * 检查是否已领取
@@ -87,26 +88,24 @@ public class AirdropServiceImpl implements AirdropService {
         AirdropEntity latest = airdropMapper.selectLatest();
         if (latest != null && latest.getIsActive()) {
             info.setTotalAirdrop(latest.getTotalAmount());
-            info.setPerAddress(latest.getPerAddressAmount());
+            info.setPerAddress(BigDecimal.ZERO); // Merkle 模式下每个人金额不同
+            info.setClaimedAmount(BigDecimal.ZERO);
+            info.setRemainingAmount(latest.getTotalAmount());
+            info.setMyClaimed(BigDecimal.ZERO);
 
-            AirdropEntity userRecord = airdropMapper.selectByAddress(address);
-            if (userRecord != null && userRecord.getHasClaimed()) {
-                info.setClaimedAmount(userRecord.getAmount());
-            } else {
-                info.setClaimedAmount(BigDecimal.ZERO);
-            }
-
-            if (latest.getTotalAmount() != null && info.getClaimedAmount() != null) {
-                info.setRemainingAmount(latest.getTotalAmount().subtract(info.getClaimedAmount()));
-            }
-
-            info.setMyClaimed(info.getClaimedAmount());
+            // 前端需要的字段
+            info.setTotalAirdropAmount(latest.getTotalAmount());
+            info.setFixedAmount(BigDecimal.ZERO);
+            info.setIsActive(true);
         } else {
             info.setTotalAirdrop(BigDecimal.ZERO);
             info.setPerAddress(BigDecimal.ZERO);
             info.setClaimedAmount(BigDecimal.ZERO);
             info.setRemainingAmount(BigDecimal.ZERO);
             info.setMyClaimed(BigDecimal.ZERO);
+            info.setTotalAirdropAmount(BigDecimal.ZERO);
+            info.setFixedAmount(BigDecimal.ZERO);
+            info.setIsActive(false);
         }
 
         return info;
@@ -139,7 +138,6 @@ public class AirdropServiceImpl implements AirdropService {
             AirdropEntity entity = airdropMapper.selectByAddress(address);
 
             if (entity == null) {
-                // 如果不存在记录，创建一条
                 entity = new AirdropEntity();
                 entity.setAddress(address);
                 entity.setHasClaimed(true);
@@ -147,7 +145,6 @@ public class AirdropServiceImpl implements AirdropService {
                 entity.setCreateTime(LocalDateTime.now());
                 airdropMapper.insert(entity);
             } else if (!Boolean.TRUE.equals(entity.getHasClaimed())) {
-                // 如果存在但未标记为已领取，更新状态
                 entity.setHasClaimed(true);
                 entity.setClaimTime(LocalDateTime.now());
                 airdropMapper.updateById(entity);
@@ -158,6 +155,7 @@ public class AirdropServiceImpl implements AirdropService {
             log.error("Failed to mark airdrop as claimed for {}: {}", address, e.getMessage());
         }
     }
+
 
     /**
      * 转换为 DTO

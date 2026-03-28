@@ -14,6 +14,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Service;
 import org.web3j.model.Airdrop;
+import org.web3j.model.Dao;
 import org.web3j.model.EXTH;
 import org.web3j.model.Exchange;
 import org.web3j.protocol.Web3j;
@@ -22,6 +23,7 @@ import org.web3j.protocol.core.methods.response.EthGetTransactionReceipt;
 import org.web3j.protocol.core.methods.response.Transaction;
 import org.web3j.protocol.core.methods.response.TransactionReceipt;
 
+import javax.annotation.PostConstruct;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.math.BigInteger;
@@ -361,6 +363,22 @@ public class BlockchainServiceImpl implements BlockchainService {
             throw new RuntimeException("Verify transaction failed: " + e.getMessage(), e);
         }
     }
+
+    /**
+     * 初始化事件订阅
+     */
+    @PostConstruct
+    public void initEventSubscriptions() {
+        log.info("Initializing event subscriptions...");
+        try {
+            // 等待合约加载完成
+            Thread.sleep(2000);
+            subscribeToEvents();
+        } catch (Exception e) {
+            log.error("Failed to initialize event subscriptions", e);
+        }
+    }
+
     // ============================================================
     // === Event Subscription（链上 → 链下）：监听事件同步
     // ============================================================
@@ -423,6 +441,17 @@ public class BlockchainServiceImpl implements BlockchainService {
                     );
             disposables.add(userBlacklistedSubscription);
             log.info("Subscribed to Exchange UserBlacklisted events");
+
+            // ✅ 新增：订阅 DAO 的 ProposalExecuted 事件
+            Disposable proposalExecutedSubscription = daoContract.proposalExecutedEventFlowable(
+                            DefaultBlockParameterName.LATEST,
+                            DefaultBlockParameterName.LATEST)
+                    .subscribe(
+                            event -> handleProposalExecutedEvent(event),
+                            error -> log.error("Error in ProposalExecuted event subscription", error)
+                    );
+            disposables.add(proposalExecutedSubscription);
+            log.info("Subscribed to DAO ProposalExecuted events");
 
             log.info("Event subscriptions initialized successfully. Total subscriptions: {}", disposables.size());
 
@@ -612,6 +641,42 @@ public class BlockchainServiceImpl implements BlockchainService {
 
         } catch (Exception e) {
             log.error("Error processing AirdropClaimed event", e);
+        }
+    }
+
+    /**
+     * 处理 ProposalExecuted 事件
+     */
+    private void handleProposalExecutedEvent(Dao.ProposalExecutedEventResponse event) {
+        try {
+            log.info("Processing ProposalExecuted event: proposalId={}", event.proposalId);
+
+            // 发送到消息队列，由监听器处理
+            sendProposalExecutedMessage(event);
+
+        } catch (Exception e) {
+            log.error("Error processing ProposalExecuted event", e);
+        }
+    }
+
+    /**
+     * 发送提案执行消息到消息队列
+     */
+    private void sendProposalExecutedMessage(Dao.ProposalExecutedEventResponse event) {
+        try {
+            Map<String, Object> message = new HashMap<>();
+            message.put("event", "ProposalExecuted");
+            message.put("proposalId", event.proposalId.toString());
+            /*message.put("targetContract", event.targetContract);*/
+            message.put("blockNumber", event.log.getBlockNumber());
+            message.put("txHash", event.log.getTransactionHash());
+            message.put("timestamp", System.currentTimeMillis());
+
+            rabbitTemplate.convertAndSend(SystemConstants.MQQueue.BLOCKCHAIN_EVENT, message);
+
+            log.debug("Proposal executed message sent to queue");
+        } catch (Exception e) {
+            log.warn("Failed to send proposal executed message: {}", e.getMessage());
         }
     }
 
@@ -825,7 +890,7 @@ public class BlockchainServiceImpl implements BlockchainService {
     private String handleDaoTransaction(String methodName, Object[] params) throws Exception {
         if ("createProposal".equals(methodName)) {
             return daoContract.createProposal(
-                     (String) params[1],
+                    (String) params[1],
                     (BigInteger) params[2], (byte[]) params[3],(String) params[0]);
         } else if ("vote".equals(methodName)) {
             return daoContract.vote((BigInteger) params[0], (Boolean) params[1]);
@@ -833,7 +898,7 @@ public class BlockchainServiceImpl implements BlockchainService {
             return daoContract.queueProposal((BigInteger) params[0]);
         } else if ("executeProposal".equals(methodName)) {
             return daoContract.executeProposal(
-                    (BigInteger) params[0], (BigInteger) params[1]);
+                    (BigInteger) params[0]);
         } else if ("cancelProposal".equals(methodName)) {
             return daoContract.cancelProposal((BigInteger) params[0]);
         } else if ("getProposalState".equals(methodName)) {

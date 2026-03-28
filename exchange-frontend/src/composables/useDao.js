@@ -4,6 +4,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { useDaoStore, ProposalState, ProposalStateText, ProposalStateTag } from '@/stores'
 import { useWalletStore } from '@/stores'
 import { hasVoted } from '@/api/dao'
+import { ethers } from 'ethers'
 
 export { ProposalState, ProposalStateText, ProposalStateTag }
 
@@ -90,11 +91,75 @@ export function useDao() {
         processing.value = true
 
         try {
-            const result = await daoStore.submitVote(proposalId, support)
+            const walletStore = useWalletStore()
+
+            if (!walletStore.address) {
+                throw new Error('请先连接钱包')
+            }
+
+            // 获取 DAO 合约地址
+            const daoAddress = import.meta.env.VITE_DAO_CONTRACT_ADDRESS
+            if (!daoAddress) {
+                throw new Error('DAO 合约地址未配置')
+            }
+
+            console.log('=== 开始链上投票 ===')
+            console.log('提案 ID:', proposalId)
+            console.log('支持:', support)
+            console.log('DAO 合约地址:', daoAddress)
+            console.log('用户地址:', walletStore.address)
+
+            // DAO 合约的 vote 方法 ABI
+            const daoABI = [
+                'function vote(uint256 _proposalId, bool _support) external'
+            ]
+
+            // 创建合约实例
+            const provider = new ethers.BrowserProvider(window.ethereum)
+            const signer = await provider.getSigner()
+            const contract = new ethers.Contract(daoAddress, daoABI, signer)
+
+            console.log('准备调用合约方法...')
+
+            // 调用投票方法
+            const tx = await contract.vote(proposalId, support)
+
+            console.log('交易已发送:', tx.hash)
+            console.log('等待交易确认...')
+
+            // 等待交易确认
+            const receipt = await tx.wait()
+
+            console.log('交易已确认:', receipt.transactionHash)
+
             ElMessage.success('投票成功！')
-            return result
+
+            // 刷新提案详情
+            try {
+                await loadProposalDetail(proposalId)
+            } catch (err) {
+                console.error('Failed to refresh proposal:', err)
+            }
+
+            return { txHash: receipt.transactionHash }
         } catch (error) {
-            ElMessage.error('投票失败：' + error.message)
+            console.error('Vote error:', error)
+
+            if (error.code === 'ACTION_REJECTED') {
+                ElMessage.warning('您取消了投票操作')
+            } else if (error.reason && error.reason.includes('No voting power')) {
+                ElMessage.error({
+                    message: '您在提案创建时没有投票权，无法参与投票！请在下次创建提案前先委托投票权！',
+                    duration: 6000
+                })
+            } else if (error.message && error.message.includes('No voting power')) {
+                ElMessage.error({
+                    message: '您在提案创建时没有投票权，无法参与投票！',
+                    duration: 6000
+                })
+            } else {
+                ElMessage.error('投票失败：' + (error.reason || error.message || '未知错误'))
+            }
             throw error
         } finally {
             processing.value = false
@@ -118,13 +183,13 @@ export function useDao() {
         }
     }
 
-    async function submitExecute(proposalId, eta) {
+    async function submitExecute(proposalId) {
         if (processing.value) return
 
         processing.value = true
 
         try {
-            const result = await daoStore.submitExecute(proposalId, eta)
+            const result = await daoStore.submitExecute(proposalId)
             ElMessage.success('提案已执行')
             return result
         } catch (error) {
