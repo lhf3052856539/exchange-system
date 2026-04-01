@@ -4,7 +4,6 @@ pragma solidity ^0.8.21;
 import './EXTH.sol';
 import './Timelock.sol' as TimelockContract;
 
-
 /**
  * @title Dao - 模块化的DAO治理合约
  * @notice 职责：提案、投票、计票。通过后将提案指令发送给Timelock执行。
@@ -19,6 +18,9 @@ contract Dao {
 
     mapping(uint256 => Proposal) public proposals;
     mapping(uint256 => mapping(address => bool)) public hasVoted;
+
+    //单独记录提案创建者，不放入结构体中，解决 Stack Too Deep 且不破坏前端 ABI
+    mapping(uint256 => address) public proposalProposers;
 
     // --- 数据结构 ---
 
@@ -59,8 +61,8 @@ contract Dao {
     /**
     * 设置投票周期
     */
-    function  setVotingPeriod (uint256 newPeriod) external{
-    votingPeriod = newPeriod;
+    function setVotingPeriod(uint256 newPeriod) external {
+        votingPeriod = newPeriod;
     }
 
     function propose(address _target, uint256 _value, bytes calldata _callData, string calldata _description) external returns (uint256) {
@@ -73,6 +75,9 @@ contract Dao {
         newProposal.target = _target;
         newProposal.value = _value;
         newProposal.callData = _callData;
+
+        // 在单独的 mapping 中记录提案人
+        proposalProposers[proposalId] = msg.sender;
 
         emit ProposalCreated(proposalId, msg.sender, _target, _description);
         return proposalId;
@@ -126,11 +131,17 @@ contract Dao {
 
     function cancel(uint256 _proposalId) external {
         Proposal storage p = proposals[_proposalId];
-        require(state(_proposalId) != ProposalState.Executed, "Cannot cancel executed proposal");
 
-        if (p.timelockId != bytes32(0)) {
-            timelock.cancelTransaction(p.target, p.value, p.callData, p.eta);
-        }
+        //核心修改 3：通过单独的 mapping 来验证权限
+        require(msg.sender == proposalProposers[_proposalId], "Only proposer can cancel");
+
+        // 只能在特定状态下取消
+        ProposalState currentState = state(_proposalId);
+        require(
+            currentState == ProposalState.Pending ||
+            currentState == ProposalState.Active,
+            "Can only cancel pending or active proposals"
+        );
 
         p.canceled = true;
         emit ProposalCanceled(_proposalId);
@@ -160,4 +171,3 @@ contract Dao {
         return ProposalState.Active;
     }
 }
-

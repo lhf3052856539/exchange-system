@@ -33,10 +33,21 @@
             <el-tag v-else type="warning">乙方</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" fixed="right">
+        <el-table-column label="操作" fixed="right" width="300">
           <template #default="{ row }">
+            <!-- 授权按钮（甲方在 PARTY_B_CONFIRMED 状态显示） -->
             <el-button
-                v-if="row.status === 'CONFIRMING_A' && row.myRole === 'PARTY_A'"
+                v-if="row.myRole === 'PARTY_A' && row.status === 5"
+                type="warning"
+                size="small"
+                @click="handleApprove(row)"
+            >
+              授权手续费
+            </el-button>
+
+            <!-- 确认按钮 -->
+            <el-button
+                v-if="row.status === TRADE_STATUS_CODE.CONFIRMING_A && row.myRole === 'PARTY_A'"
                 type="primary"
                 size="small"
                 @click="handleConfirm(row, true)"
@@ -44,13 +55,15 @@
               确认转账
             </el-button>
             <el-button
-                v-if="row.status === 'CONFIRMING_B' && row.myRole === 'PARTY_B'"
+                v-if="row.status === TRADE_STATUS_CODE.CONFIRMING_B && row.myRole === 'PARTY_B'"
                 type="primary"
                 size="small"
                 @click="handleConfirm(row, false)"
             >
               确认收款
             </el-button>
+
+            <!-- 争议按钮 -->
             <el-button
                 v-if="!row.isCompleted && !row.isDisputed && row.myRole !== undefined"
                 type="danger"
@@ -59,6 +72,8 @@
             >
               发起争议
             </el-button>
+
+            <!-- 详情按钮 -->
             <el-button
                 size="small"
                 @click="viewDetail(row.tradeId)"
@@ -123,7 +138,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { useTradeStore } from '@/stores'
 import { useWalletStore } from '@/stores'
 import { useTrade } from '@/composables/useTrade'
-import { TRADE_STATUS } from '@/config/constants'
+import { TRADE_STATUS_CODE } from '@/config/constants'
 
 const router = useRouter()
 const tradeStore = useTradeStore()

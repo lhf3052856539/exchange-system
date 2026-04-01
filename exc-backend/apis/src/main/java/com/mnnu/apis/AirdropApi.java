@@ -16,6 +16,12 @@ import java.util.List;
 public interface AirdropApi {
 
 
+    /**
+     *
+     * @param address
+     * @param request
+     * @return
+     */
     JsonVO<AirdropDTO> claimAirdrop(@CurrentUser String address,
                                     @RequestBody AirdropClaimRequest request);
 

@@ -14,6 +14,21 @@ export const TRADE_STATUS = {
   DISPUTED: 'DISPUTED'          // 争议中
 }
 
+// 交易状态数字映射（后端返回的数字状态码）
+export const TRADE_STATUS_CODE = {
+  WAITING_MATCH: 0,      // 等待匹配
+  MATCHED: 1,            // 已匹配
+  CONFIRMING_A: 2,       // 等待甲方确认
+  PARTY_A_CONFIRMED: 3,  // 甲方已确认
+  CONFIRMING_B: 4,       // 等待乙方确认
+  PARTY_B_CONFIRMED: 5,  // 乙方已确认
+  PENDING_CHAIN_CONFIRM: 6, // 待链上确认
+  COMPLETED: 7,          // 已完成
+  DISPUTED: 8,           // 争议中
+  EXPIRED: 9,            // 已过期
+  CANCELLED: 10          // 已取消
+}
+
 // 用户类型枚举
 export const USER_TYPE = {
   NEW: 'NEW',       // 新用户

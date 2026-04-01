@@ -98,10 +98,11 @@ export function useTrade() {
             3: 'success',   // PARTY_A_CONFIRMED - 甲方已确认
             4: 'primary',   // CONFIRMING_B - 等待乙方提交哈希
             5: 'success',   // PARTY_B_CONFIRMED - 乙方已确认
-            6: 'success',   // COMPLETED
-            7: 'danger',    // DISPUTED
-            8: 'info',      // EXPIRED
-            9: 'info'       // CANCELLED
+            6: 'warning',   // PENDING_CHAIN_CONFIRM - 待链上确认
+            7: 'success',   // COMPLETED - 已完成
+            8: 'danger',    // DISPUTED - 争议中
+            9: 'info',      // EXPIRED - 已过期
+            10: 'info'      // CANCELLED - 已取消
         }
 
         return statusMap[status] || 'info'
@@ -116,14 +117,16 @@ export function useTrade() {
             3: '等待乙方确认',     // PARTY_A_CONFIRMED - 甲方已确认，等待乙方
             4: '等待乙方转账',     // CONFIRMING_B - 等待乙方提交哈希
             5: '等待甲方最终确认', // PARTY_B_CONFIRMED - 乙方已确认，等待甲方
-            6: '已完成',          // COMPLETED
-            7: '争议中',          // DISPUTED
-            8: '已过期',          // EXPIRED
-            9: '已取消'           // CANCELLED
+            6: '待链上确认',      // PENDING_CHAIN_CONFIRM - 待链上确认
+            7: '已完成',          // COMPLETED - 已完成
+            8: '争议中',          // DISPUTED - 争议中
+            9: '已过期',          // EXPIRED - 已过期
+            10: '已取消'          // CANCELLED - 已取消
         }
 
         return textMap[status] || status
     }
+
 
     return {
         tradeList,

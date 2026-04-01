@@ -115,6 +115,24 @@ const routes = [
         }
     },
     {
+        path: '/arbitration',
+        name: 'Arbitration',
+        component: () => import('@/views/arbitration/Committee.vue'),
+        meta: {
+            title: '仲裁委员会',
+            requiresAuth: true
+        }
+    },
+    {
+        path: '/arbitration/proposal/:proposalId',
+        name: 'ArbitrationProposalDetail',
+        component: () => import('@/views/arbitration/ProposalDetail.vue'),
+        meta: {
+            title: '仲裁提案详情',
+            requiresAuth: true
+        }
+    },
+    {
         path: '/profile',
         name: 'Profile',
         component: () => import('@/views/profile/Profile.vue'),
@@ -156,6 +174,7 @@ const routes = [
             title: '页面不存在'
         }
     }
+
 ]
 
 export default routes

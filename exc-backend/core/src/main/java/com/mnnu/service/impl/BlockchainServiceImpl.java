@@ -1,8 +1,11 @@
 package com.mnnu.service.impl;
 
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.mnnu.constant.SystemConstants;
 import com.mnnu.dto.BlockchainTransactionDTO;
 import com.mnnu.dto.TradeDTO;
+import com.mnnu.entity.ProposalRecordEntity;
+import com.mnnu.mapper.ProposalRecordMapper;
 import com.mnnu.service.BlockchainService;
 import com.mnnu.service.TradeService;
 import com.mnnu.utils.Web3jUtil;
@@ -34,6 +37,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
 @Slf4j
@@ -77,6 +81,9 @@ public class BlockchainServiceImpl implements BlockchainService {
     @Autowired
     private TreasureWrapper treasureContract;
 
+    @Autowired
+    private ProposalRecordMapper proposalRecordMapper;
+
 
     // 缓存的奖励金额
     private BigInteger cachedRewardAmount = null;
@@ -96,6 +103,17 @@ public class BlockchainServiceImpl implements BlockchainService {
     @Override
     public String claimAirdropOnChain(String address, BigInteger amount, List<byte[]> merkleProof) {
         log.info("Claiming airdrop on chain for user: {}, amount: {}", address, amount);
+        log.info("Merkle proof details:");
+        log.info("  - Proof count: {}", merkleProof.size());
+        for (int i = 0; i < merkleProof.size(); i++) {
+            byte[] proof = merkleProof.get(i);
+            StringBuilder hexBuilder = new StringBuilder();
+            for (byte b : proof) {
+                hexBuilder.append(String.format("%02x", b));
+            }
+            log.info("  - Proof[{}]: 0x{}", i, hexBuilder.toString());
+        }
+
         try {
             if (airdropContract != null) {
                 String txHash = airdropContract.claimAirdrop(amount, merkleProof);
@@ -453,6 +471,28 @@ public class BlockchainServiceImpl implements BlockchainService {
             disposables.add(proposalExecutedSubscription);
             log.info("Subscribed to DAO ProposalExecuted events");
 
+            // 🔥 新增：订阅 DAO 的 VoteCast 事件
+            Disposable voteCastSubscription = daoContract.voteCastEventFlowable(
+                            DefaultBlockParameterName.LATEST,
+                            DefaultBlockParameterName.LATEST)
+                    .subscribe(
+                            event -> handleVoteCastEvent(event),
+                            error -> log.error("Error in VoteCast event subscription", error)
+                    );
+            disposables.add(voteCastSubscription);
+            log.info("Subscribed to DAO VoteCast events");
+
+            // 🔥 新增：订阅 DAO 的 ProposalCreated 事件
+            Disposable proposalCreatedSubscription = daoContract.proposalCreatedEventFlowable(
+                            DefaultBlockParameterName.LATEST,
+                            DefaultBlockParameterName.LATEST)
+                    .subscribe(
+                            event -> handleProposalCreatedEvent(event),
+                            error -> log.error("Error in ProposalCreated event subscription", error)
+                    );
+            disposables.add(proposalCreatedSubscription);
+            log.info("Subscribed to DAO ProposalCreated events");
+
             log.info("Event subscriptions initialized successfully. Total subscriptions: {}", disposables.size());
 
         } catch (Exception e) {
@@ -644,12 +684,12 @@ public class BlockchainServiceImpl implements BlockchainService {
         }
     }
 
-    /**
-     * 处理 ProposalExecuted 事件
-     */
     private void handleProposalExecutedEvent(Dao.ProposalExecutedEventResponse event) {
         try {
             log.info("Processing ProposalExecuted event: proposalId={}", event.proposalId);
+
+            // 🔥 更新数据库中的提案状态和投票数据
+            updateProposalRecordFromChain(event.proposalId, event.log.getBlockNumber().longValue());
 
             // 发送到消息队列，由监听器处理
             sendProposalExecutedMessage(event);
@@ -657,6 +697,66 @@ public class BlockchainServiceImpl implements BlockchainService {
         } catch (Exception e) {
             log.error("Error processing ProposalExecuted event", e);
         }
+    }
+
+    // 🔥 新增：处理 VoteCast 事件
+    private void handleVoteCastEvent(Dao.VoteCastEventResponse event) {
+        try {
+            log.info("Processing VoteCast event: proposalId={}, voter={}, weight={}",
+                    event.proposalId, event.voter, event.weight);
+
+            // 🔥 更新数据库中的投票数据
+            updateProposalRecordFromChain(event.proposalId, event.log.getBlockNumber().longValue());
+
+        } catch (Exception e) {
+            log.error("Error processing VoteCast event", e);
+        }
+    }
+
+    // 🔥 新增：处理 ProposalCreated 事件
+    private void handleProposalCreatedEvent(Dao.ProposalCreatedEventResponse event) {
+        try {
+            log.info("Processing ProposalCreated event: proposalId={}, proposer={}",
+                    event.proposalId, event.proposer);
+
+            // 🔥 更新数据库中的提案信息
+            updateProposalRecordFromChain(event.proposalId, event.log.getBlockNumber().longValue());
+
+        } catch (Exception e) {
+            log.error("Error processing ProposalCreated event", e);
+        }
+    }
+
+    // 🔥 新增：通用方法 - 从链上同步提案数据到数据库
+    private void updateProposalRecordFromChain(BigInteger proposalId, Long blockNumber) {
+        CompletableFuture.runAsync(() -> {
+            try {
+                // 从链上获取最新的提案信息
+                DaoWrapper.ProposalInfo proposalInfo = daoContract.getProposal(proposalId);
+
+                // 查询数据库记录
+                LambdaQueryWrapper<ProposalRecordEntity> wrapper = new LambdaQueryWrapper<>();
+                wrapper.eq(ProposalRecordEntity::getProposalId, proposalId.toString());
+                ProposalRecordEntity dbRecord = proposalRecordMapper.selectOne(wrapper);
+
+                if (dbRecord != null) {
+                    // 🔥 同步所有链上数据
+                    dbRecord.setBlockNumber(blockNumber);
+                    dbRecord.setYesVotes(new BigDecimal(proposalInfo.yesVotes != null ? proposalInfo.yesVotes : BigInteger.ZERO));
+                    dbRecord.setNoVotes(new BigDecimal(proposalInfo.noVotes != null ? proposalInfo.noVotes : BigInteger.ZERO));
+                    dbRecord.setDeadline(proposalInfo.deadline != null ? proposalInfo.deadline.longValue() : null);
+                    dbRecord.setSnapshotBlock(proposalInfo.snapshotBlock != null ? proposalInfo.snapshotBlock.longValue() : null);
+                    dbRecord.setUpdatedAt(LocalDateTime.now());
+
+                    proposalRecordMapper.updateById(dbRecord);
+                    log.info("🔄 Synced proposal {} data from chain: blockNumber={}, deadline={}, yesVotes={}, noVotes={}",
+                            proposalId, blockNumber, dbRecord.getDeadline(),
+                            dbRecord.getYesVotes(), dbRecord.getNoVotes());
+                }
+            } catch (Exception e) {
+                log.warn("⚠️ Failed to sync proposal data from chain: {}", e.getMessage());
+            }
+        });
     }
 
     /**
@@ -687,13 +787,15 @@ public class BlockchainServiceImpl implements BlockchainService {
         try {
             log.info("Processing UserBlacklisted event: user={}", event.user);
 
-            // 只发送消息到消息队列，由监听器处理业务逻辑
+            // ✅ MultiSigWallet 已经执行了 blacklistUser，链上状态已改变
+            // ✅ 这里只需要发送消息到 MQ，让监听器更新数据库即可
             sendUserBlacklistMessage(event);
 
         } catch (Exception e) {
             log.error("Error processing UserBlacklisted event", e);
         }
     }
+
 
     /**
      * 发送用户拉黑消息到消息队列
@@ -997,6 +1099,14 @@ public class BlockchainServiceImpl implements BlockchainService {
         throw new IllegalStateException("EXTH contract not initialized");
     }
 
+    @Override
+    public String getExchangeContractAddress() {
+        if (exchangeContract != null) {
+            return exchangeContract.getContractAddress();
+        }
+        throw new IllegalStateException("Exchange contract not initialized");
+    }
+
     /**
      * 收取手续费
      * 数据流向：链下请求 → 链上合约
@@ -1010,6 +1120,51 @@ public class BlockchainServiceImpl implements BlockchainService {
             log.error("Collect fee failed", e);
             throw new RuntimeException("Collect fee failed: " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * 检查用户对 Exchange 合约的 EXTH 授权额度
+     */
+    @Override
+    public BigInteger checkExthAllowance(String owner, String spender) throws Exception {
+        if (exthContract == null) {
+            throw new IllegalStateException("EXTH contract not initialized");
+        }
+
+        // EXTHWrapper.allowance() 已经调用了 send()，直接返回 BigInteger
+        BigInteger allowance = exthContract.allowance(owner, spender);
+
+        log.info("Check allowance: owner={}, spender={}, allowance={}", owner, spender, allowance);
+        return allowance;
+    }
+
+    /**
+     * 授权 Exchange 合约使用 EXTH 代币
+     */
+    @Override
+    public String approveExth(String spender, BigInteger amount) throws Exception {
+        if (exthContract == null) {
+            throw new IllegalStateException("EXTH contract not initialized");
+        }
+
+        // EXTHWrapper.approve() 已经调用了 send() 并返回交易哈希
+        String txHash = exthContract.approve(spender, amount);
+
+        log.info("Approve EXTH: spender={}, amount={}, txHash={}", spender, amount, txHash);
+        return txHash;
+    }
+
+
+    @Override
+    public String getTreasureContractAddress() {
+        // 从配置文件或环境变量中获取
+        return System.getenv("TREASURE_CONTRACT_ADDRESS");
+    }
+
+    @Override
+    public String getMultiSigWalletAddress() {
+        // 从配置文件或环境变量中获取
+        return System.getenv("MULTISIG_WALLET_ADDRESS");
     }
 }
 

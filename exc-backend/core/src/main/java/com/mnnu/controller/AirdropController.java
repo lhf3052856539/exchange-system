@@ -8,10 +8,12 @@ import com.mnnu.dto.AirdropInfoDTO;
 import com.mnnu.service.AirdropService;
 import com.mnnu.vo.JsonVO;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.*;
 import java.math.BigInteger;
 import java.util.List;
 
+@Slf4j
 @RestController
 @RequestMapping("/apis/airdrop")
 @RequiredArgsConstructor
@@ -33,11 +35,24 @@ public class AirdropController implements AirdropApi {
             throw new IllegalArgumentException("Merkle proof is required");
         }
 
+        // 添加调试日志
+        log.info("🔍 Received airdrop claim request:");
+        log.info("   Address: {}", address);
+        log.info("   Amount: {}", request.getAmount());
+        log.info("   Merkle Proof (hex strings): {}", merkleProof);
+        log.info("   Proof length: {}", merkleProof.size());
+
         // 将十六进制字符串数组转换为 byte[] 数组（过滤掉 null 和空值）
         List<byte[]> proofBytes = merkleProof.stream()
                 .filter(hex -> hex != null && !hex.isEmpty())
                 .map(this::hexStringToByteArray)
                 .toList();
+
+        // 添加调试日志
+        log.info("   Converted proof bytes count: {}", proofBytes.size());
+        for (int i = 0; i < proofBytes.size(); i++) {
+            log.info("   Proof[{}] length: {} bytes", i, proofBytes.get(i).length);
+        }
 
         return JsonVO.success(airdropService.claimAirdrop(address, request.getAmount(), proofBytes));
     }

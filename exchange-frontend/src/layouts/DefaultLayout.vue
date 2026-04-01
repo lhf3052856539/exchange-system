@@ -52,6 +52,11 @@
             <el-icon><Setting /></el-icon>
             <span>治理</span>
           </el-menu-item>
+
+          <el-menu-item index="/arbitration">
+            <el-icon><Stamp /></el-icon>
+            <span>仲裁</span>
+          </el-menu-item>
         </el-menu>
       </div>
 
@@ -109,12 +114,13 @@
   </el-container>
 </template>
 
-<script setup>import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+<script setup>
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useUserStore, useWalletStore } from '@/stores'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  House, Connection, Document, Coin, User, SwitchButton, Setting, Bell
+  House, Connection, Document, Coin, User, SwitchButton, Setting, Bell, Stamp
 } from '@element-plus/icons-vue'
 import { wsClient } from '@/utils/websocket'
 import { getNotifications } from '@/api/notification'

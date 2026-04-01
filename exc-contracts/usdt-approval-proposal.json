@@ -1,0 +1,6 @@
+{
+  "target": "0x4220667A323494d203ff2cd39839b709c75B35c3",
+  "value": "0",
+  "data": "0x095ea7b3000000000000000000000000e9623736a015c867b96a8b24b3b0efd06d162ce0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "description": "Authorize MultiSigWallet to spend USDT from Treasure contract"
+}

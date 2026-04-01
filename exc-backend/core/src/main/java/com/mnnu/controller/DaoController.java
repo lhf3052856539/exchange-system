@@ -6,12 +6,14 @@ import com.mnnu.dto.CreateProposalDTO;
 import com.mnnu.dto.PageDTO;
 import com.mnnu.dto.ProposalDTO;
 import com.mnnu.service.DaoService;
+import com.mnnu.service.MultiSigWalletService;
 import com.mnnu.vo.JsonVO;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.*;
 
 import java.math.BigInteger;
+import java.util.Map;
 
 /**
  * DAO治理控制器
@@ -23,6 +25,8 @@ import java.math.BigInteger;
 public class DaoController implements DaoApi {
 
     private final DaoService daoService;
+    private final MultiSigWalletService multiSigWalletService;
+
 
     @Override
     @PostMapping("/proposal/create")
@@ -139,5 +143,28 @@ public class DaoController implements DaoApi {
         log.debug("Get proposal count");
         BigInteger count = daoService.getProposalCount();
         return JsonVO.success(count);
+    }
+
+    @GetMapping("/treasure/balance")
+    public JsonVO<Map<String, Object>> getTreasureBalance() {
+        Map<String, Object> balance = daoService.getTreasureBalance();
+        return JsonVO.success(balance);
+    }
+
+    @PostMapping("/rotate-committee-member")
+    public JsonVO<String> rotateCommitteeMember(
+            @CurrentUser String address,
+            @RequestParam String oldMember,
+            @RequestParam String newMember) {
+
+        // 这里应该添加 DAO 投票逻辑，只有投票通过才能轮换
+        // 简化处理，直接由 owner 调用
+
+        try {
+            // TODO: 实现 DAO 投票通过后轮换委员会成员的逻辑
+            return JsonVO.error("Committee rotation requires DAO approval");
+        } catch (Exception e) {
+            return JsonVO.error(e.getMessage());
+        }
     }
 }

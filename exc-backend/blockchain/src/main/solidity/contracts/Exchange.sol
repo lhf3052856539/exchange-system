@@ -6,6 +6,7 @@ import './node_modules/@openzeppelin/contracts-5.1.0/access/Ownable.sol';
 import './node_modules/@openzeppelin/contracts-5.1.0/utils/ReentrancyGuard.sol';
 import './EXTH.sol';
 import './USDT.sol';
+import './MultiSigWallet.sol';
 
 /**
  * @title 去中心化兑换系统合约
@@ -17,6 +18,8 @@ contract Exchange is Ownable, ReentrancyGuard {
 
     EXTH public exthToken;
     USDT public usdtToken;
+    MultiSigWallet public multiSigWallet;
+    mapping(address => bool) public authorizedCallers; //授权调用者
 
     // 手续费：万分之一
     uint256 public constant FEE_RATE = 1;
@@ -74,11 +77,16 @@ contract Exchange is Ownable, ReentrancyGuard {
     event RewardUpdated(uint256 newReward, uint256 totalUTVolume);
     event MatchRequested(bytes32 indexed requestId, address indexed user, uint256 amount, uint256 timestamp);
     event FeeCollected(uint256 indexed tradeId, address indexed feePayerA,address indexed feePayerB, uint256 feeAmount);
+    event DisputeSubmittedToArbitration(uint256 indexed tradeId, address indexed initiator, address indexed accusedParty);
 
     // ==================== 修饰器 ====================
 
     modifier notBlacklisted(address user) {
         require(!users[user].isBlacklisted, unicode"用户在黑名单中！");
+        _;
+    }
+    modifier onlyAuthorized() {
+        require(msg.sender == owner() || authorizedCallers[msg.sender], "Not authorized");
         _;
     }
 
@@ -291,19 +299,32 @@ contract Exchange is Ownable, ReentrancyGuard {
         trade.disputedParty = disputedParty;
 
         emit TradeDisputed(tradeId, disputedParty);
+
+        if (address(multiSigWallet) != address(0)) {
+            emit DisputeSubmittedToArbitration(tradeId, msg.sender, disputedParty);
+        }
     }
 
     /**
      * @notice 将用户加入黑名单
-     * @dev 如果存在争议，需要查询区块链浏览器，将有问题的一方由Dao合约拉入黑名单
+     * @dev 如果存在争议，需要查询区块链浏览器，将有问题的一方由Dao合约或者仲裁委员会拉入黑名单
      * @param user 用户地址
      */
-    function blacklistUser(address user) external onlyOwner {
+    function blacklistUser(address user) external onlyAuthorized {
         require(!users[user].isBlacklisted, unicode"该用户已在黑名单中！");
 
         users[user].isBlacklisted = true;
 
         emit UserBlacklisted(user);
+    }
+
+    /**
+     * @notice [onlyOwner] 设置授权的黑名单调用者
+     * @param _caller 被授权的调用者地址
+     * @param _authorized 是否授权
+     */
+    function setAuthorizedCaller(address _caller, bool _authorized) external onlyOwner {
+        authorizedCallers[_caller] = _authorized;
     }
 
 
@@ -346,6 +367,12 @@ contract Exchange is Ownable, ReentrancyGuard {
         userData.isBlacklisted
         );
     }
+
+    function setMultiSigWallet(address _multiSigWallet) external onlyOwner {
+        require(_multiSigWallet != address(0), "Invalid address");
+        multiSigWallet = MultiSigWallet(_multiSigWallet);
+    }
+
 
     /**
      * @notice 获取交易信息

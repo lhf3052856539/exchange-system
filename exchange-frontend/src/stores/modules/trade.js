@@ -23,28 +23,37 @@ export const useTradeStore = defineStore('trade', {
     }),
 
     actions: {
-        async loadTrades(params = {}) {
+        async loadTrades(queryParams = {}) {
             this.loading = true
             try {
                 const walletStore = useWalletStore()
                 const address = walletStore.address
 
+                console.log('=== Store loadTrades ===')
+                console.log('Address:', address)
+                console.log('Query params:', queryParams)
+
                 if (!address) {
-                    throw new Error('Wallet not connected')
+                    console.warn('Wallet not connected')
+                    this.tradeList = []
+                    this.pagination.total = 0
+                    return
                 }
 
-                const queryParams = {
-                    address: String(address),
-                    status: params.status || null,
-                    page: params.page || this.pagination.page,
-                    size: params.size || this.pagination.size
-                }
-
-                const res = await getUserTrades(address, queryParams.status, queryParams.page, queryParams.size)
+                // 调用 API
+                const res = await getUserTrades(
+                    address,
+                    queryParams.status || '',
+                    queryParams.page || 1,
+                    queryParams.size || this.pagination.size
+                )
                 console.log('Trade list response:', res)
 
-                this.tradeList = Array.isArray(res) ? res : []
+                // 修复：API 返回的是 {code: 200, data: [...]}，需要取 data 字段
+                this.tradeList = Array.isArray(res.data) ? res.data : []
                 this.pagination.total = this.tradeList.length
+
+                console.log('Trade list loaded:', this.tradeList.length, 'items')
             } catch (error) {
                 console.error('Failed to load trades:', error)
                 throw error

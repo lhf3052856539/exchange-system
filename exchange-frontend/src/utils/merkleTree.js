@@ -1,5 +1,4 @@
 // src/utils/merkleTree.js - 使用 merkle-output.json 的数据
-
 import merkleOutput from '../../merkle-output.json'
 
 const MERKLE_ROOT = merkleOutput.merkleRoot
@@ -8,7 +7,8 @@ const CLAIMS = merkleOutput.claims
 /**
  * 生成用户的 Merkle Proof
  */
-export function generateMerkleProof(userAddress) {
+export function generateMerkleProof(userAddress, _whitelistData) {
+    // 忽略传入的 whitelistData，直接使用 merkle-output.json 中的数据
     const normalizedAddress = userAddress.toLowerCase()
 
     // 在 claims 中查找用户（不区分大小写）
@@ -24,7 +24,8 @@ export function generateMerkleProof(userAddress) {
 
     console.log('🌳 Using Merkle Proof from merkle-output.json:', {
         root: MERKLE_ROOT,
-        address: address,
+        originalAddress: address,
+        requestedAddress: userAddress,
         amount: claimData.amount,
         proofLength: claimData.proof.length,
         proof: claimData.proof

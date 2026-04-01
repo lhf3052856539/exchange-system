@@ -1,0 +1,18 @@
+{
+  "target": "0xA2D892A1D38C904e7fA841404AAD0328c09aEe72",
+  "value": "0",
+  "data": "0x095ea7b3000000000000000000000000e9623736a015c867b96a8b24b3b0efd06d162ce0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "description": "Authorize MultiSigWallet to spend USDT from Treasure contract for arbitration compensation",
+  "parameters": {
+    "caller": "0xA2D892A1D38C904e7fA841404AAD0328c09aEe72",
+    "token": "0x4220667A323494d203ff2cd39839b709c75B35c3",
+    "spender": "0xE9623736a015c867b96a8b24B3b0Efd06d162cE0",
+    "amount": "115792089237316195423570985008687907853269984665640564039457584007913129639935"
+  },
+  "steps": [
+    "1. Create a DAO proposal with this calldata",
+    "2. Vote on the proposal (need 2/3 votes)",
+    "3. Execute the proposal after voting period",
+    "4. MultiSigWallet will be authorized to use USDT from Treasure"
+  ]
+}

@@ -204,6 +204,25 @@ public class DaoWrapper extends BaseWrapper{
         return contract.proposalExecutedEventFlowable(startBlock, endBlock);
     }
 
+    // 🔥 新增：监听 VoteCast 事件
+    public Flowable<Dao.VoteCastEventResponse> voteCastEventFlowable(
+            DefaultBlockParameterName startBlock,
+            DefaultBlockParameterName endBlock) {
+        return contract.voteCastEventFlowable(startBlock, endBlock);
+    }
+
+    // 🔥 新增：监听 ProposalCreated 事件
+    public Flowable<Dao.ProposalCreatedEventResponse> proposalCreatedEventFlowable(
+            DefaultBlockParameterName startBlock,
+            DefaultBlockParameterName endBlock) {
+        return contract.proposalCreatedEventFlowable(startBlock, endBlock);
+    }
+
+    // 🔥 新增：获取交易收据中的 VoteCast 事件
+    public List<Dao.VoteCastEventResponse> getVoteCastEvents(TransactionReceipt receipt) {
+        return Dao.getVoteCastEvents(receipt);
+    }
+
     /**
      * 获取交易收据中的 ProposalExecuted 事件
      */

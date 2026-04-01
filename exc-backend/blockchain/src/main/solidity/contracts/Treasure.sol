@@ -11,13 +11,24 @@ import "./node_modules/@openzeppelin/contracts-5.1.0/access/Ownable.sol";
  */
 contract Treasure is Ownable {
 
+    address public multiSigWallet;
+    mapping(address => bool) public authorizedCallers;
+
     // --- 事件 ---
     event Deposit(address indexed sender, uint256 amount);
     event WithdrawalETH(address indexed to, uint256 amount);
     event WithdrawalERC20(address indexed token, address indexed to, uint256 amount);
     event CallExecuted(address indexed target, uint256 value, bytes data);
+    event CompensationPaid(address indexed token, address indexed victim, uint256 amount);
+    event AuthorizedCallerAdded(address indexed caller);
+    event AuthorizedCallerRemoved(address indexed caller);
 
     constructor() Ownable(msg.sender) {}
+
+    modifier onlyAuthorized() {
+        require(msg.sender == owner() || authorizedCallers[msg.sender], "Not authorized");
+        _;
+    }
 
     // --- 资金接收 ---
 
@@ -51,7 +62,7 @@ contract Treasure is Ownable {
      * @param _to 接收代币的地址。
      * @param _amount 提取的代币数量。
      */
-    function withdrawERC20(address _tokenAddress, address _to, uint256 _amount) external onlyOwner {
+    function withdrawERC20(address _tokenAddress, address _to, uint256 _amount) external onlyAuthorized {
         require(_to != address(0), "Treasure: Invalid recipient address");
         IERC20 token = IERC20(_tokenAddress);
         require(token.balanceOf(address(this)) >= _amount, "Treasure: Insufficient token balance");
@@ -59,6 +70,37 @@ contract Treasure is Ownable {
         token.transfer(_to, _amount);
 
         emit WithdrawalERC20(_tokenAddress, _to, _amount);
+    }
+
+
+    function payCompensation(address _tokenAddress, address _victim, uint256 _amount) external onlyAuthorized {
+        require(_victim != address(0), "Treasure: Invalid victim address");
+        require(_amount > 0, "Treasure: Amount must be greater than 0");
+
+        IERC20 token = IERC20(_tokenAddress);
+        require(token.balanceOf(address(this)) >= _amount, "Treasure: Insufficient token balance");
+
+        token.transfer(_victim, _amount);
+
+        emit CompensationPaid(_tokenAddress, _victim, _amount);
+    }
+
+    function setMultiSigWallet(address _multiSigWallet) external onlyOwner {
+        require(_multiSigWallet != address(0), "Invalid address");
+        multiSigWallet = _multiSigWallet;
+        authorizedCallers[_multiSigWallet] = true;
+        emit AuthorizedCallerAdded(_multiSigWallet);
+    }
+
+    function addAuthorizedCaller(address _caller) external onlyOwner {
+        require(_caller != address(0), "Invalid address");
+        authorizedCallers[_caller] = true;
+        emit AuthorizedCallerAdded(_caller);
+    }
+
+    function removeAuthorizedCaller(address _caller) external onlyOwner {
+        authorizedCallers[_caller] = false;
+        emit AuthorizedCallerRemoved(_caller);
     }
 
 

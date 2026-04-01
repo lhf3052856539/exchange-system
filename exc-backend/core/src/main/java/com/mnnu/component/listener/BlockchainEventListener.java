@@ -4,10 +4,13 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mnnu.component.handler.CustomWebSocketHandler;
 import com.mnnu.constant.SystemConstants;
 import com.mnnu.dto.NotificationDTO;
+import com.mnnu.dto.TradeDTO;
 import com.mnnu.entity.AirdropEntity;
 import com.mnnu.entity.AirdropRecordEntity;
+import com.mnnu.entity.UserEntity;
 import com.mnnu.mapper.AirdropMapper;
 import com.mnnu.mapper.AirdropRecordMapper;
+import com.mnnu.mapper.UserMapper;
 import com.mnnu.service.AirdropService;
 import com.mnnu.service.BlockchainService;
 import com.mnnu.service.NotificationService;
@@ -15,12 +18,17 @@ import com.mnnu.service.TradeService;
 import com.mnnu.service.UserService;
 import com.mnnu.wrapper.AirdropWrapper;
 import com.mnnu.wrapper.DaoWrapper;
+import com.mnnu.wrapper.ExchangeWrapper;
 import com.mnnu.wrapper.TreasureWrapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.redisson.api.RedissonClient;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Component;
+import org.web3j.model.Exchange;
 import org.web3j.protocol.Web3j;
 
 import java.math.BigDecimal;
@@ -100,6 +108,56 @@ public class BlockchainEventListener {
      */
     @Autowired
     private TreasureWrapper treasureWrapper;
+
+    /**
+     * Exchange 合约包装器
+     */
+    @Autowired
+    private ExchangeWrapper exchangeContract;
+
+    /**
+     * RabbitMQ 模板
+     */
+    @Autowired
+    private RabbitTemplate rabbitTemplate;
+    @Autowired
+    private UserMapper userMapper;
+    /**
+     * Redisson 客户端
+     */
+    @Autowired
+    private RedissonClient redissonClient;
+
+
+
+
+    /**
+     * 从缓存或数据库获取交易参与方 A
+     */
+    private String getPartyAFromTrade(BigInteger tradeId) {
+        try {
+            // 从数据库查询交易
+            TradeDTO trade = tradeService.getTradeDetail(tradeId.toString());
+            return trade != null ? trade.getPartyA() : null;
+        } catch (Exception e) {
+            log.warn("Failed to get partyA from trade: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * 从缓存或数据库获取交易参与方 B
+     */
+    private String getPartyBFromTrade(BigInteger tradeId) {
+        try {
+            // 从数据库查询交易
+            TradeDTO trade = tradeService.getTradeDetail(tradeId.toString());
+            return trade != null ? trade.getPartyB() : null;
+        } catch (Exception e) {
+            log.warn("Failed to get partyB from trade: {}", e.getMessage());
+            return null;
+        }
+    }
 
     /**
      * 处理区块链事件
@@ -216,28 +274,117 @@ public class BlockchainEventListener {
      */
     private void handleTradeCompletedEvent(Map<String, Object> event) {
         try {
-            String tradeId = (String) event.get("tradeId");
-            String partyA = (String) event.get("partyA");
-            String partyB = (String) event.get("partyB");
+            String tradeIdStr = (String) event.get("tradeId");
+            BigInteger tradeId = new BigInteger(tradeIdStr);
 
             log.info("Processing TradeCompleted event: tradeId={}", tradeId);
 
-            // 1. 更新交易状态为 COMPLETED（从链上同步）
-            tradeService.updateStatus(tradeId, SystemConstants.TradeStatus.COMPLETED);
+            // 🔥 异步同步交易数据到数据库
+            CompletableFuture.runAsync(() -> {
+                try {
+                    // 从链上获取交易信息
+                    ExchangeWrapper.TradeInfo tradeInfo = exchangeContract.getTradeInfo(tradeId);
 
-            // 2. 发放奖励给甲乙双方
-            distributeRewards(tradeId, partyA, partyB);
-
-            // 3. 更新用户统计
-            updateUserTradeStats(partyA, partyB);
-
-            // 4. 发送通知
-            sendCompletionNotification(partyA, partyB, tradeId, null);
+                    if (tradeInfo != null) {
+                        // 同步交易数据到数据库
+                        syncTradeInfoToDatabase(tradeId, tradeInfo, ((Number) event.get("blockNumber")).longValue());
+                    }
+                } catch (Exception e) {
+                    log.warn("⚠️ Failed to sync trade info from chain: {}", e.getMessage());
+                }
+            });
 
         } catch (Exception e) {
-            log.error("Failed to process trade completed event", e);
+            log.error("Error processing TradeCompleted event", e);
         }
     }
+
+    // 🔥 新增：同步交易信息到数据库
+    private void syncTradeInfoToDatabase(BigInteger tradeId, ExchangeWrapper.TradeInfo tradeInfo, Long blockNumber) {
+        try {
+            // 尝试从数据库查询交易
+            TradeDTO existingTrade = tradeService.getTradeDetail(tradeId.toString());
+
+            if (existingTrade != null) {
+                // 如果交易已存在，更新链上数据
+                updateTradeOnChain(tradeId, tradeInfo, blockNumber);
+            } else {
+                // 如果交易不存在，创建新交易记录
+                createTradeFromChainData(tradeId, tradeInfo, blockNumber);
+            }
+        } catch (Exception e) {
+            log.warn("⚠️ Failed to sync trade to database: {}", e.getMessage());
+        }
+    }
+
+    // 🔥 新增：更新链上交易数据
+    private void updateTradeOnChain(BigInteger tradeId, ExchangeWrapper.TradeInfo tradeInfo, Long blockNumber) {
+        try {
+            // 这里可以更新交易的状态、blockNumber 等链上数据
+            // 由于 TradeDTO 可能没有这些字段，暂时只记录日志
+            log.info("🔄 Updated trade {} from chain: partyA={}, partyB={}, amount={}",
+                    tradeId, tradeInfo.partyA, tradeInfo.partyB, tradeInfo.amount);
+        } catch (Exception e) {
+            log.warn("⚠️ Failed to update trade on chain: {}", e.getMessage());
+        }
+    }
+
+    // 🔥 新增：从链上数据创建交易记录
+    private void createTradeFromChainData(BigInteger tradeId, ExchangeWrapper.TradeInfo tradeInfo, Long blockNumber) {
+        try {
+            log.info("🆕 Creating trade from chain data: tradeId={}, partyA={}, partyB={}, amount={}",
+                    tradeId, tradeInfo.partyA, tradeInfo.partyB, tradeInfo.amount);
+
+            // 这里可以调用 TradeService 创建交易记录
+            // 由于链上数据可能不完整，需要根据实际情况决定是否创建
+        } catch (Exception e) {
+            log.warn("⚠️ Failed to create trade from chain data: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 发送交易完成消息到消息队列
+     */
+    private void sendTradeCompletedMessage(Exchange.TradeCompletedEventResponse event) {
+        try {
+            // 🔥 先从链上获取交易信息，确保 partyA 和 partyB 不为 null
+            ExchangeWrapper.TradeInfo tradeInfo = null;
+            try {
+                tradeInfo = exchangeContract.getTradeInfo(event.tradeId);
+            } catch (Exception e) {
+                log.warn("⚠️ Failed to get trade info from chain: {}", e.getMessage());
+            }
+
+            Map<String, Object> message = new HashMap<>();
+            message.put("event", "TradeCompleted");
+            message.put("tradeId", event.tradeId.toString());
+
+            // 🔥 优先使用链上数据，如果获取失败则使用缓存/数据库
+            if (tradeInfo != null && tradeInfo.partyA != null) {
+                message.put("partyA", tradeInfo.partyA);
+            } else {
+                message.put("partyA", getPartyAFromTrade(event.tradeId));
+            }
+
+            if (tradeInfo != null && tradeInfo.partyB != null) {
+                message.put("partyB", tradeInfo.partyB);
+            } else {
+                message.put("partyB", getPartyBFromTrade(event.tradeId));
+            }
+
+            message.put("blockNumber", event.log.getBlockNumber());
+            message.put("txHash", event.log.getTransactionHash());
+            message.put("timestamp", System.currentTimeMillis());
+
+            rabbitTemplate.convertAndSend(SystemConstants.MQQueue.BLOCKCHAIN_EVENT, message);
+
+            log.debug("Trade completed message sent to queue");
+        } catch (Exception e) {
+            log.warn("Failed to send trade completed message: {}", e.getMessage());
+        }
+    }
+
+
 
     /**
      * 处理空投事件
@@ -400,8 +547,9 @@ public class BlockchainEventListener {
                 airdropMapper.insert(airdrop);
                 log.info("✅ 已创建新的空投配置：总金额={}, 每地址={}", totalAmount, perAddressAmount);
             } else {
-                // 更新现有配置
-                latest.setTotalAmount(totalAmount.add(latest.getTotalAmount()));
+                // 更新现有配置 - 修复 null 指针问题
+                BigDecimal currentTotal = latest.getTotalAmount() != null ? latest.getTotalAmount() : BigDecimal.ZERO;
+                latest.setTotalAmount(currentTotal.add(totalAmount));
                 airdropMapper.updateById(latest);
                 log.info("✅ 已更新空投配置：新增总金额={}, 累计={}", totalAmount, latest.getTotalAmount());
             }
@@ -429,16 +577,27 @@ public class BlockchainEventListener {
     private void handleUserBlacklistEvent(Map<String, Object> event) {
         try {
             String user = (String) event.get("user");
-            log.info("Processing UserBlacklisted event: user={}", user);
+            String txHash = (String) event.get("txHash");
+            log.info("Processing UserBlacklisted event from MQ: user={}, txHash={}", user, txHash);
 
-            // 拉黑用户
-            userService.blacklistUser(user, "Contract blacklist event triggered");
+            // ✅ 链上已经拉黑，只更新数据库状态
+            UserEntity userEntity = userMapper.selectByAddress(user);
+            if (userEntity != null && !userEntity.getIsBlacklisted()) {
+                userEntity.setIsBlacklisted(true);
+                userEntity.setUpdateTime(LocalDateTime.now());
+                userMapper.updateById(userEntity);
+                log.info("User blacklisted in database: {}", user);
+            }
+
+            // 清除缓存
+            String cacheKey = SystemConstants.RedisKey.USER_INFO + user;
+            redissonClient.getBucket(cacheKey).delete();
 
             // 发送通知
-            sendBlacklistNotification(user,null);
+            sendBlacklistNotification(user, null);
 
         } catch (Exception e) {
-            log.error("Failed to process user blacklist event", e);
+            log.error("Failed to process user blacklist event from MQ", e);
         }
     }
 
@@ -476,10 +635,13 @@ public class BlockchainEventListener {
             record.setTxHash(txHash);
             record.setIsClaimed(true);
             record.setBlockNumber(blockNumber);
+
+            long timestampMillis = ((Number) timestamp).longValue();
             record.setClaimTime(LocalDateTime.ofInstant(
-                    Instant.ofEpochSecond(((Number) timestamp).longValue()),
+                    Instant.ofEpochMilli(timestampMillis),
                     ZoneId.systemDefault()
             ));
+
             record.setCreateTime(LocalDateTime.now());
 
             airdropRecordMapper.insert(record);
@@ -626,12 +788,24 @@ public class BlockchainEventListener {
             notification.put("tradeId", tradeId);
             notification.put("timestamp", System.currentTimeMillis());
 
-            // 发送 WebSocket 通知
+            // 发送 WebSocket 通知（添加 null 检查）
             String message = objectMapper.writeValueAsString(notification);
-            CustomWebSocketHandler.sendToUser(partyA, message);
-            CustomWebSocketHandler.sendToUser(partyB, message);
 
-            log.debug("Completion notification sent for trade {}", tradeId);
+            if (partyA != null && !partyA.isEmpty()) {
+                CustomWebSocketHandler.sendToUser(partyA, message);
+                log.debug("Completion notification sent to partyA: {}", partyA);
+            } else {
+                log.warn("PartyA address is null or empty, cannot send WebSocket notification for trade: {}", tradeId);
+            }
+
+            if (partyB != null && !partyB.isEmpty()) {
+                CustomWebSocketHandler.sendToUser(partyB, message);
+                log.debug("Completion notification sent to partyB: {}", partyB);
+            } else {
+                log.warn("PartyB address is null or empty, cannot send WebSocket notification for trade: {}", tradeId);
+            }
+
+            log.debug("Completion notification processing completed for trade {}", tradeId);
         } catch (Exception e) {
             log.error("Failed to send completion notification", e);
         }

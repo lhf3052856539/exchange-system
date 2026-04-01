@@ -59,7 +59,7 @@
       <div class="proposal-content">
         <!-- 基本信息 -->
         <el-descriptions title="基本信息" :column="2" border>
-          <el-descriptions-item label="提案 ID">{{ currentProposal?.id || proposalId }}</el-descriptions-item>
+          <el-descriptions-item label="提案 ID">{{ currentProposal?.proposalId || currentProposal?.id || proposalId }}</el-descriptions-item>
           <el-descriptions-item label="状态">
             <el-tag :type="getStateTag(currentProposal?.state)">
               {{ getStateText(currentProposal?.state) }}

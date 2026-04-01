@@ -91,8 +91,16 @@ public class EXTHWrapper extends BaseWrapper{
      * 查询授权额度
      */
     public BigInteger allowance(String owner, String spender) throws Exception {
-        return contract.allowance(owner, spender).send();
+        log.info("🔍 EXTHWrapper.allowance called: owner={}, spender={}, contract={}",
+                owner, spender, contract.getContractAddress());
+
+        BigInteger result = contract.allowance(owner, spender).send();
+
+        log.info("✅ EXTHWrapper.allowance result: {} for owner={}, spender={}",
+                result, owner, spender);
+        return result;
     }
+
 
     /**
      * 获取代币名称

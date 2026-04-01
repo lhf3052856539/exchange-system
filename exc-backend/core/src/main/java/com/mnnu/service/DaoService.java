@@ -7,6 +7,7 @@ import com.mnnu.dto.ProposalDTO;
 
 
 import java.math.BigInteger;
+import java.util.Map;
 
 /**
  * DAO 服务接口
@@ -100,4 +101,10 @@ public interface DaoService {
      * @return 提案总数
      */
     BigInteger getProposalCount();
+
+    /**
+     * 获取金库余额信息
+     * @return 包含各种代币余额的 Map
+     */
+    Map<String, Object> getTreasureBalance();
 }

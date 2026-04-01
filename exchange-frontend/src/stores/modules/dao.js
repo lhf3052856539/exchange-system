@@ -117,13 +117,15 @@ export const useDaoStore = defineStore('dao', {
 
                 console.log('🔍 Loading proposal detail:', proposalId, 'with address:', address)
 
-                // ✅ 修复：request 拦截器已经返回了 res.data，不需要再取 .data
+                // ✅ 修复：request 拦截器返回的是 response.data，即 JsonVO 对象
+                // 需要再取 .data 获取实际的 ProposalDTO
                 const res = await getProposalDetail(proposalId, address)
 
                 console.log('📦 Proposal detail response:', res)
+                console.log('📦 Response data field:', res.data)
 
-                // ✅ res 就是 ProposalDTO 对象，不是 JsonVO 对象
-                this.currentProposal = res
+                // ✅ res 是 JsonVO 对象，需要取 res.data 获取 ProposalDTO
+                this.currentProposal = res.data || res
                 return this.currentProposal
             } catch (error) {
                 console.error('❌ Failed to load proposal detail:', error)

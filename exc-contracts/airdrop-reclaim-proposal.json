@@ -1,0 +1,15 @@
+{
+  "timestamp": "2026-03-29T08:04:35.464Z",
+  "proposalInfo": {
+    "target": "0x65448A5dCC4d672cEa986CDa8DfeAA194037b8DB",
+    "value": "0",
+    "calldata": "0x3c54caa5",
+    "description": "Proposal: Reclaim remaining tokens from Airdrop contract and return to DAO Treasury",
+    "method": "Airdrop.reclaimTokens()"
+  },
+  "contracts": {
+    "airdrop": "0x65448A5dCC4d672cEa986CDa8DfeAA194037b8DB",
+    "treasure": "0xA2D892A1D38C904e7fA841404AAD0328c09aEe72",
+    "exthToken": "0x1ccb3Fe3C1C1C603dC2fD26Ce103326182113bdB"
+  }
+}

@@ -276,5 +276,16 @@ public class ExchangeWrapper extends BaseWrapper{
             DefaultBlockParameterName endBlock) {
         return contract.userBlacklistedEventFlowable(startBlock, endBlock);
     }
+    /**
+     * 获取合约地址
+     */
+    public String getContractAddress() {
+        if (contract != null) {
+            return contract.getContractAddress();
+        }
+        return contractAddress; // 返回配置的地址
+    }
+
+
 }
 

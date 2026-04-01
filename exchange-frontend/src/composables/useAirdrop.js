@@ -51,8 +51,8 @@ export function useAirdrop() {
             await airdropStore.fetchAirdropInfo()
             await airdropStore.checkClaimedStatus()
 
-            ElMessage.success('空投领取成功！')
-            return result.data
+            ElMessage.success(`空投领取成功！交易哈希：${result.txHash?.substring(0, 10)}...`)
+            return result
         } catch (error) {
             console.error('Claim failed:', error)
 
@@ -68,6 +68,8 @@ export function useAirdrop() {
                     errorMsg = '空投池余额不足'
                 } else if (error.message.includes('not in whitelist')) {
                     errorMsg = '您不在空投白名单中'
+                } else if (error.message.includes('Invalid Merkle proof')) {
+                    errorMsg = 'Merkle proof 验证失败，请检查地址是否正确'
                 } else {
                     errorMsg = error.message
                 }

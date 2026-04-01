@@ -36,6 +36,32 @@ export function disputeTrade(data) {
     })
 }
 
+/**
+ * 检查 EXTH 授权额度
+ */
+export function checkExthAllowance() {
+    return request({
+        url: '/blockchain/allowance',
+        method: 'get'
+    }).then(res => {
+        // 直接返回整个响应，因为拦截器已经处理过 res.data
+        return res
+    })
+}
+
+/**
+ * 授权 Exchange 合约
+ */
+export function approveExth(amount) {
+    return request({
+        url: '/blockchain/approve',
+        method: 'post',
+        data: { amount }
+    }).then(res => {
+        return res
+    })
+}
+
 export function getTradeDetail(tradeId) {
     return request({
         url: `/trade/detail/${tradeId}`,

@@ -82,9 +82,25 @@ public interface BlockchainService {
     String getExthContractAddress();
 
     /**
+     * 获取 Exchange 合约地址
+     */
+    String getExchangeContractAddress();
+
+    /**
      * 收取手续费
      */
     String collectFee(BigInteger tradeId, BigInteger feeAmount);
+
+    /**
+     * 检查用户对 Exchange 合约的 EXTH 授权额度
+     */
+    java.math.BigInteger checkExthAllowance(String owner, String spender) throws Exception;
+
+    /**
+     * 授权 Exchange 合约使用 EXTH 代币
+     */
+    String approveExth(String spender, BigInteger amount) throws Exception;
+
 
     String claimAirdropOnChain(String address, BigInteger amount, List<byte[]> merkleProof);
 
@@ -92,4 +108,14 @@ public interface BlockchainService {
      * 完成交易（调用 Exchange 合约）
      */
     String completeTrade(BigInteger tradeId);
+
+    /**
+     * 获取 Treasure 金库合约地址
+     */
+    String getTreasureContractAddress();
+
+    /**
+     * 获取多签钱包合约地址
+     */
+    String getMultiSigWalletAddress();
 }

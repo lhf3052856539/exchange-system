@@ -12,6 +12,7 @@ import java.math.BigInteger;
 public class ProposalDTO implements Serializable {
     private static final long serialVersionUID = 1L;
 
+    // DAO 提案相关字段
     private BigInteger proposalId;
     private String description;
     private BigInteger deadline;
@@ -28,4 +29,14 @@ public class ProposalDTO implements Serializable {
     private Boolean hasVoted;
     private String proposer;
     private BigInteger startTime;
+
+    // 多签仲裁提案相关字段
+    private BigInteger tradeId;
+    private String accusedParty;
+    private String victimParty;
+    private BigInteger compensationAmount;
+    private String arbitrationReason;
+    private BigInteger voteCount;
+    private Boolean rejected;
+    private BigInteger createdAt;
 }
