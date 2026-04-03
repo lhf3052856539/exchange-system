@@ -48,7 +48,7 @@
               {{ votingPowerLocal || votingPower || 0 }} EXTH
               <el-button
                   v-if="walletStore.isConnected && (votingPowerLocal || votingPower || 0) === 0"
-                  type="primary"
+                  type="warning"
                   size="small"
                   @click.stop="handleDelegate"
                   :loading="delegating"
@@ -56,6 +56,42 @@
               >
                 委托投票权
               </el-button>
+            </div>
+          </div>
+        </el-col>
+      </el-row>
+
+      <!-- 更多统计信息 -->
+      <el-row :gutter="20" class="stats-row">
+        <el-col :span="6">
+          <div class="stat-item">
+            <div class="stat-label">公示期中</div>
+            <div class="stat-value info">
+              {{ proposals.filter(p => p.state === 3).length }}
+            </div>
+          </div>
+        </el-col>
+        <el-col :span="6">
+          <div class="stat-item">
+            <div class="stat-label">已取消</div>
+            <div class="stat-value danger">
+              {{ proposals.filter(p => p.state === 4).length }}
+            </div>
+          </div>
+        </el-col>
+        <el-col :span="6">
+          <div class="stat-item">
+            <div class="stat-label">已结束</div>
+            <div class="stat-value info">
+              {{ proposals.filter(p => getTimeRemaining(p.deadline) === '已结束').length }}
+            </div>
+          </div>
+        </el-col>
+        <el-col :span="6">
+          <div class="stat-item">
+            <div class="stat-label">待执行</div>
+            <div class="stat-value warning">
+              {{ proposals.filter(p => p.executed === false && p.state === 2).length }}
             </div>
           </div>
         </el-col>

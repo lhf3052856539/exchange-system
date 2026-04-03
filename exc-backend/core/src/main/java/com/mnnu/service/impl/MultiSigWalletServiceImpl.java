@@ -223,6 +223,10 @@ public class MultiSigWalletServiceImpl implements MultiSigWalletService {
                 dto.setExecuted(((org.web3j.abi.datatypes.Bool) results.get(6)).getValue());
                 dto.setRejected(((org.web3j.abi.datatypes.Bool) results.get(7)).getValue());
                 dto.setDeadline(((Uint256) results.get(8)).getValue());
+
+                // 🔥 使用 deadline 作为 createdAt（因为链上没有创建时间，用截止时间近似）
+                dto.setCreatedAt(dto.getDeadline());
+
                 return dto;
             }
 
@@ -468,6 +472,39 @@ public class MultiSigWalletServiceImpl implements MultiSigWalletService {
 
         log.info("Transaction confirmed! Gas used: {}", receipt.getGasUsed());
         return txHash;
+    }
+    @Override
+    public List<ProposalDTO> getHistoryProposals() {
+        try {
+            log.info("Getting proposal count for history...");
+            // 获取提案总数
+            BigInteger count = getProposalCount();
+            log.info("Total proposals on chain: {}", count);
+
+            List<ProposalDTO> historyList = new ArrayList<>();
+
+            // 遍历所有提案，过滤出已执行或已拒绝的
+            for (BigInteger i = BigInteger.ZERO; i.compareTo(count) < 0; i = i.add(BigInteger.ONE)) {
+                try {
+                    log.info("Fetching proposal details for ID: {}", i);
+                    ProposalDTO proposal = getProposalDetails(i);
+                    log.info("Proposal {}: executed={}, rejected={}", i, proposal.getExecuted(), proposal.getRejected());
+
+                    // 只返回已执行或已拒绝的提案
+                    if (Boolean.TRUE.equals(proposal.getExecuted()) || Boolean.TRUE.equals(proposal.getRejected())) {
+                        historyList.add(proposal);
+                    }
+                } catch (Exception e) {
+                    log.warn("Failed to get proposal {}: {}", i, e.getMessage());
+                }
+            }
+
+            log.info("Returning {} history proposals", historyList.size());
+            return historyList;
+        } catch (Exception e) {
+            log.error("Failed to get history proposals", e);
+            throw new BusinessException("Failed to get history proposals");
+        }
     }
 
 }

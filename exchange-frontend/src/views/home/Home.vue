@@ -165,10 +165,14 @@
             <el-table-column prop="pair" label="货币对" width="120" />
             <el-table-column prop="rate" label="汇率" width="150">
               <template #default="{ row }">
-                <span class="rate-value">{{ row.rate }}</span>
+                <span class="rate-value">{{ formatNumber(row.rate) }}</span>
               </template>
             </el-table-column>
-            <el-table-column prop="updateTime" label="更新时间" />
+            <el-table-column prop="updateTime" label="更新时间">
+              <template #default="{ row }">
+                <span>{{ formatTime(row.updateTime) }}</span>
+              </template>
+            </el-table-column>
           </el-table>
           <div v-if="ratesList.length === 0" class="empty-data">暂无数据</div>
         </page-container>
@@ -182,21 +186,27 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useUserStore } from '@/stores'
 import { useWalletStore } from '@/stores/modules/wallet'
-import { formatNumber } from '@/utils/format'
 import { getRates } from '@/api/rate'
 import {
   Connection, Coin, List, Document, Wallet, Ticket, User, Refresh
 } from '@element-plus/icons-vue'
 import PageContainer from '@/components/common/PageContainer.vue'
 import wsClient from '@/utils/websocket'
+import { formatNumber, formatTime } from '@/utils/format'
 
 const userStore = useUserStore()
 const walletStore = useWalletStore() // 使用钱包 store 获取 address
 const ratesList = ref([])
 
 function calculateSuccessRate(stats) {
-  if (!stats || stats.totalTrades === 0) return 0
-  return Math.round((stats.completedTrades / stats.totalTrades) * 100)
+  if (!stats || stats.totalTrades === 0) return 100
+  const rate = Math.round((stats.completedTrades / stats.totalTrades) * 100)
+  console.log('📊 Success rate calculation:', {
+    totalTrades: stats.totalTrades,
+    completedTrades: stats.completedTrades,
+    rate: rate
+  })
+  return rate
 }
 
 const userTypeTag = computed(() => {
@@ -226,10 +236,21 @@ async function refreshUserInfo() {
       return
     }
 
+    // 获取用户信息（包含 EXTH 余额、可交易 UT、用户类型）
     const userInfoResult = await userStore.fetchUserInfo(walletStore.address)
     console.log('✅ User info result:', userInfoResult)
     console.log('✅ User info stored:', userStore.userInfo)
 
+    // 验证关键字段
+    if (userInfoResult) {
+      console.log('📊 User Data:')
+      console.log('  - EXTH Balance:', userInfoResult.exthBalance)
+      console.log('  - Tradeable UT:', userInfoResult.tradeableUt)
+      console.log('  - User Type:', userInfoResult.userType)
+      console.log('  - User Type Desc:', userInfoResult.userTypeDesc)
+    }
+
+    // 获取交易统计
     const tradeStatsResult = await userStore.fetchTradeStats(walletStore.address)
     console.log('✅ Trade stats result:', tradeStatsResult)
     console.log('✅ Trade stats stored:', userStore.tradeStats)
@@ -240,19 +261,21 @@ async function refreshUserInfo() {
     console.error('❌ Failed to refresh data:', error)
   }
 }
+
 async function fetchRates() {
   try {
     const res = await getRates()
     console.log('📊 Rates API response:', res)
 
     // res 本身就是数据对象
-    const rates = res || {}
+    const rates = res.data || res
     if (rates && Object.keys(rates).length > 0) {
+      const updateTime = formatTime(rates.timestamp || new Date())
       ratesList.value = [
-        { pair: 'USD/CNY', rate: rates.usdToCny || '0.00', updateTime: rates.timestamp || new Date().toLocaleString() },
-        { pair: 'USD/GBP', rate: rates.usdToGbp || '0.00', updateTime: rates.timestamp || new Date().toLocaleString() },
-        { pair: 'CNY/USD', rate: rates.cnyToUsd || '0.00', updateTime: rates.timestamp || new Date().toLocaleString() },
-        { pair: 'GBP/USD', rate: rates.gbpToUsd || '0.00', updateTime: rates.timestamp || new Date().toLocaleString() }
+        { pair: 'USD/CNY', rate: rates.usdToCny || '0.00', updateTime },
+        { pair: 'USD/GBP', rate: rates.usdToGbp || '0.00', updateTime },
+        { pair: 'CNY/USD', rate: rates.cnyToUsd || '0.00', updateTime },
+        { pair: 'GBP/USD', rate: rates.gbpToUsd || '0.00', updateTime }
       ]
       console.log('✅ Rates list set:', ratesList.value)
     } else {
@@ -284,6 +307,7 @@ onMounted(() => {
   }
 
   console.log('📍 当前钱包地址:', walletStore.address)
+  console.log('📍 Token:', localStorage.getItem('token'))
 
   if (walletStore.address) {
     wsClient.connect(walletStore.address)

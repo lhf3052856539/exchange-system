@@ -41,4 +41,9 @@ public interface MultiSigWalletService {
      */
     List<ProposalDTO> getPendingProposals();
 
+    /**
+     * 获取仲裁历史（已执行或已拒绝的提案）
+     */
+    List<ProposalDTO> getHistoryProposals();
+
 }

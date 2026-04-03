@@ -66,7 +66,9 @@
             </el-tag>
           </el-descriptions-item>
           <el-descriptions-item label="提出者" :span="2">
-            {{ formatAddress(currentProposal?.proposer) }}
+            <span style="font-family: 'Courier New', monospace; font-size: 13px;">
+              {{ currentProposal?.proposer }}
+            </span>
           </el-descriptions-item>
           <el-descriptions-item label="投票开始" :span="2">
             {{ formatTimestamp(currentProposal?.startTime) }}
@@ -131,7 +133,7 @@
             </el-button>
             <el-button
                 v-if="canQueue"
-                type="primary"
+                type="warning"
                 @click="handleQueue"
                 :loading="processing"
             >
@@ -156,11 +158,14 @@
           </el-space>
         </div>
 
+
         <!-- 目标合约信息 -->
         <el-divider>执行信息</el-divider>
         <el-descriptions :column="2" border>
-          <el-descriptions-item label="目标合约">
-            {{ formatAddress(currentProposal?.targetContract) }}
+          <el-descriptions-item label="目标合约" :span="2">
+            <span style="font-family: 'Courier New', monospace; font-size: 13px; word-break: break-all;">
+              {{ currentProposal?.targetContract }}
+            </span>
           </el-descriptions-item>
           <el-descriptions-item label="ETH 数量">
             {{ currentProposal?.value || 0 }} ETH
@@ -168,9 +173,10 @@
           <el-descriptions-item label="调用数据" :span="2">
             <el-input
                 type="textarea"
-                :model-value="currentProposal?.callData || '0x'"
+                :model-value="currentProposal?.callData"
                 :rows="4"
                 readonly
+                placeholder="0x"
             />
           </el-descriptions-item>
         </el-descriptions>
@@ -269,11 +275,6 @@ const canCancel = computed(() => {
           currentProposal.value?.state === ProposalState.Succeeded) &&
       walletStore.isConnected
 })
-
-function formatAddress(address) {
-  if (!address) return ''
-  return `${address.slice(0, 10)}...${address.slice(-8)}`
-}
 
 function formatVotingPower(power) {
   return Number(power).toFixed(2)

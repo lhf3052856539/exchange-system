@@ -1,8 +1,9 @@
 // src/utils/format.js
 import dayjs from 'dayjs'
 
-export function formatAddress(address, start = 6, end = 4) {
+export function formatAddress(address, start = 6, end = 4, full = false) {
   if (!address) return ''
+  if (full) return address
   return `${address.slice(0, start)}...${address.slice(-end)}`
 }
 

@@ -32,12 +32,12 @@
           </el-descriptions-item>
           <el-descriptions-item label="被指控方">
             <div class="address-link">
-              {{ formatAddress(proposal.accusedParty) }}
+              {{ proposal.accusedParty }}
             </div>
           </el-descriptions-item>
           <el-descriptions-item label="受害方">
             <div class="address-link">
-              {{ formatAddress(proposal.victimParty) }}
+              {{ proposal.victimParty }}
             </div>
           </el-descriptions-item>
           <el-descriptions-item label="赔偿金额">
@@ -68,7 +68,7 @@
             <span class="section-title">仲裁原因</span>
           </template>
           <div class="reason-content">
-            {{ proposal.reason }}
+            {{ proposal.arbitrationReason || proposal.reason || '无' }}
           </div>
         </el-card>
 

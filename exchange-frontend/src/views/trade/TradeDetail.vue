@@ -41,11 +41,10 @@
           <el-descriptions-item label="交易对">
             {{ trade.fromCurrency }}/{{ trade.toCurrency }}
           </el-descriptions-item>
-          <el-descriptions-item label="金额 (UT)">
+          <el-descriptions-item label="金额 (USD)">
             {{ trade.amount }}
           </el-descriptions-item>
-          <el-descriptions-item label="匹配汇率">
-            1 {{ trade.fromCurrency }} = {{ trade.exchangeRate }} {{ trade.toCurrency }}
+          <el-descriptions-item label="匹配汇率">            1 {{ trade.fromCurrency }} = {{ trade.exchangeRate }} {{ trade.toCurrency }}
           </el-descriptions-item>
           <el-descriptions-item label="我的角色">
             <el-tag v-if="isPartyA" type="success">甲方</el-tag>
@@ -75,7 +74,8 @@
           <div class="parties-container">
             <div class="party-card">
               <h3>甲方 (Party A)</h3>
-              <p><strong>地址:</strong> {{ formatAddress(trade.partyA) }}</p>
+              <p><strong>地址:</strong> <span style="font-family: 'Courier New', monospace; font-size: 13px; word-break: break-all;">{{ trade.partyA }}</span></p>
+              <p><strong>应发送金额:</strong> {{ formatAmount(trade.amountA) }} {{ trade.fromCurrency }}</p>
               <p><strong>转账哈希:</strong> {{ trade.partyATxHash || '待确认' }}</p>
               <p><strong>状态:</strong>
                 <el-tag v-if="trade.partyATxHash" type="success">已转账</el-tag>
@@ -85,7 +85,8 @@
 
             <div class="party-card">
               <h3>乙方 (Party B)</h3>
-              <p><strong>地址:</strong> {{ formatAddress(trade.partyB) }}</p>
+              <p><strong>地址:</strong> <span style="font-family: 'Courier New', monospace; font-size: 13px; word-break: break-all;">{{ trade.partyB }}</span></p>
+              <p><strong>应发送金额:</strong> {{ formatAmount(trade.amountB) }} {{ trade.toCurrency }}</p>
               <p><strong>收款哈希:</strong> {{ trade.txHashB || '待确认' }}</p>
               <p><strong>状态:</strong>
                 <el-tag v-if="trade.txHashB" type="success">已收款</el-tag>

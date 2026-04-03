@@ -16,7 +16,7 @@
       <div v-loading="loading">
         <el-descriptions title="账户信息" :column="1" border>
           <el-descriptions-item label="钱包地址">
-            {{ walletStore.shortAddress || '-' }}
+            {{ walletStore.address || '-' }}
           </el-descriptions-item>
           <el-descriptions-item label="用户类型">
             <el-tag :type="userTypeTag">{{ userStore.userInfo?.userTypeDesc }}</el-tag>
@@ -43,7 +43,8 @@
   </div>
 </template>
 
-<script setup>import { computed, onMounted } from 'vue'
+<script setup>
+import { computed, onMounted } from 'vue'
 import { useUserStore } from '@/stores/modules/user'
 import { useWalletStore } from '@/stores/modules/wallet'
 import { Back } from '@element-plus/icons-vue'

@@ -13,13 +13,12 @@
           v-loading="loading"
           style="width: 100%"
       >
-        <el-table-column prop="tradeId" label="交易 ID" width="100" />
         <el-table-column label="交易对" width="150">
           <template #default="{ row }">
             {{ row.fromCurrency }}/{{ row.toCurrency }}
           </template>
         </el-table-column>
-        <el-table-column prop="amount" label="金额 (UT)" width="100" />
+        <el-table-column prop="amount" label="金额 (USD)" width="100" />
         <el-table-column label="状态" width="120">
           <template #default="{ row }">
             <el-tag :type="getStatusTag(row.status)">

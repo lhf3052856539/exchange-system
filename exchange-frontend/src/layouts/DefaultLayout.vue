@@ -18,53 +18,72 @@
 
       <div class="header-left">
         <div class="logo" @click="$router.push('/home')">
-          <img src="@/assets/images/logo.svg" alt="Logo">
+          <div class="logo-icon">🏦</div>
           <span>去中心化交易所</span>
         </div>
 
-        <el-menu
-            mode="horizontal"
-            :default-active="activeMenu"
-            :router="true"
-            class="nav-menu"
-        >
-          <el-menu-item index="/home">
+        <div class="nav-menu">
+          <el-button
+              text
+              :type="$route.path === '/home' ? 'primary' : 'default'"
+              @click="$router.push('/home')"
+          >
             <el-icon><House /></el-icon>
             <span>首页</span>
-          </el-menu-item>
+          </el-button>
 
-          <el-menu-item index="/trade/request">
+          <el-button
+              text
+              :type="$route.path.startsWith('/trade/request') ? 'primary' : 'default'"
+              @click="$router.push('/trade/request')"
+          >
             <el-icon><Connection /></el-icon>
             <span>交易</span>
-          </el-menu-item>
+          </el-button>
 
-          <el-menu-item index="/trade/list">
+          <el-button
+              text
+              :type="$route.path.startsWith('/trade/list') ? 'primary' : 'default'"
+              @click="$router.push('/trade/list')"
+          >
             <el-icon><Document /></el-icon>
             <span>记录</span>
-          </el-menu-item>
+          </el-button>
 
-          <el-menu-item index="/airdrop">
+          <el-button
+              text
+              :type="$route.path === '/airdrop' ? 'primary' : 'default'"
+              @click="$router.push('/airdrop')"
+          >
             <el-icon><Coin /></el-icon>
             <span>空投</span>
-          </el-menu-item>
+          </el-button>
 
-          <el-menu-item index="/dao">
+          <el-button
+              text
+              :type="$route.path === '/dao' ? 'primary' : 'default'"
+              @click="$router.push('/dao')"
+          >
             <el-icon><Setting /></el-icon>
             <span>治理</span>
-          </el-menu-item>
+          </el-button>
 
-          <el-menu-item index="/arbitration">
+          <el-button
+              text
+              :type="$route.path === '/arbitration' ? 'primary' : 'default'"
+              @click="$router.push('/arbitration')"
+          >
             <el-icon><Stamp /></el-icon>
             <span>仲裁</span>
-          </el-menu-item>
-        </el-menu>
+          </el-button>
+        </div>
       </div>
 
       <div class="header-right">
         <el-dropdown v-if="userStore.userInfo">
           <div class="user-info">
             <el-avatar :size="32" icon="User" />
-            <span class="address">{{ walletStore.shortAddress }}</span>
+            <span class="address">{{ formatAddress(walletStore.address) }}</span>
             <el-tag size="small" :type="userStore.userTypeTag">
               {{ userStore.userTypeText }}
             </el-tag>
@@ -85,10 +104,10 @@
         </el-dropdown>
 
         <el-button
-          v-else
-          type="primary"
-          size="small"
-          @click="$router.push('/login')"
+            v-else
+            type="primary"
+            size="small"
+            @click="$router.push('/login')"
         >
           登录
         </el-button>
@@ -129,6 +148,12 @@ const router = useRouter()
 const userStore = useUserStore()
 const walletStore = useWalletStore()
 const unreadCount = ref(0)
+
+// 格式化地址显示（缩短中间部分）
+function formatAddress(address) {
+  if (!address) return ''
+  return `${address.slice(0, 6)}...${address.slice(-4)}`
+}
 
 const activeMenu = computed(() => {
   const path = router.currentRoute.value.path
@@ -255,16 +280,17 @@ function handleLogout() {
   .header-left {
     display: flex;
     align-items: center;
-    gap: 32px;
+    gap: 16px;
 
     .logo {
       display: flex;
       align-items: center;
       gap: 12px;
       cursor: pointer;
+      flex-shrink: 0;
 
-      img {
-        height: 40px;
+      .logo-icon {
+        font-size: 32px;
       }
 
       span {
@@ -275,20 +301,59 @@ function handleLogout() {
     }
 
     .nav-menu {
-      border-bottom: none;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex: 1;
+      margin-left: 16px;
+
+      :deep(.el-button) {
+        padding: 8px 12px;
+        font-size: 14px;
+        border: none;
+        background: transparent;
+        color: #606266;
+        transition: all 0.3s;
+
+        &:hover {
+          background: #f5f7fa;
+          color: #409EFF;
+        }
+
+        &.is-primary {
+          color: #409EFF;
+          background: #ecf5ff;
+        }
+
+        .el-icon {
+          margin-right: 4px;
+        }
+      }
     }
   }
 
   .header-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+    margin-left: auto;
+
     .user-info {
       display: flex;
       align-items: center;
-      gap: 12px;
+      gap: 6px;
       cursor: pointer;
+      max-width: 200px;
 
       .address {
-        font-size: 14px;
+        font-size: 13px;
         color: #606266;
+        white-space: nowrap;
+      }
+
+      .el-tag {
+        flex-shrink: 0;
       }
     }
   }

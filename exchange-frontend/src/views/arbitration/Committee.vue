@@ -10,14 +10,6 @@
           <div class="header-right">
             <el-tag v-if="isCommitteeMember" type="success">委员会成员</el-tag>
             <el-tag v-else type="info">非委员会成员</el-tag>
-            <el-button
-                size="small"
-                type="primary"
-                plain
-                @click="testCommitteeStatus"
-            >
-              测试身份
-            </el-button>
           </div>
         </div>
       </template>
@@ -49,7 +41,7 @@
             >
               <div class="member-info">
                 <el-icon><User /></el-icon>
-                <span>{{ formatAddress(member) }}</span>
+                <span>{{ member }}</span>
                 <el-tag v-if="member.toLowerCase() === walletStore.address?.toLowerCase()" type="success" size="small">我</el-tag>
               </div>
             </el-descriptions-item>
@@ -82,7 +74,7 @@
             </div>
           </template>
 
-          <el-table :data="pendingDisputes" style="width: 100%">
+          <el-table :data="paginatedPendingDisputes" style="width: 100%">
             <el-table-column prop="tradeId" label="交易 ID" width="120" />
             <el-table-column prop="initiator" label="发起方" width="200">
               <template #default="{ row }">
@@ -112,7 +104,7 @@
             <el-table-column label="操作" width="120" fixed="right">
               <template #default="{ row }">
                 <el-button
-                    type="primary"
+                    type="warning"
                     size="small"
                     :loading="creatingProposal && creatingProposalTradeId === row.tradeId"
                     @click="handleCreateProposal(row)"
@@ -122,6 +114,18 @@
               </template>
             </el-table-column>
           </el-table>
+
+          <div class="pagination-container">
+            <el-pagination
+                v-model:current-page="pendingDisputesPagination.page"
+                v-model:page-size="pendingDisputesPagination.size"
+                :page-sizes="[10, 20, 50, 100]"
+                :total="pendingDisputes.length"
+                layout="total, sizes, prev, pager, next, jumper"
+                @size-change="handlePendingDisputesSizeChange"
+                @current-change="handlePendingDisputesCurrentChange"
+            />
+          </div>
 
           <el-empty v-if="pendingDisputes.length === 0" description="暂无待处理的争议" />
         </el-card>
@@ -135,19 +139,19 @@
             </div>
           </template>
 
-          <el-table :data="pendingProposals" style="width: 100%">
+          <el-table :data="paginatedPendingProposals" style="width: 100%">
             <el-table-column prop="proposalId" label="提案 ID" width="80">
               <template #default="{ row }">
                 {{ row.proposalId || row.id }}
               </template>
             </el-table-column>
             <el-table-column prop="tradeId" label="交易 ID" width="120" />
-            <el-table-column prop="accusedParty" label="被指控方" width="200">
+            <el-table-column prop="accused" label="被指控方" width="200">
               <template #default="{ row }">
                 {{ row.accusedParty }}
               </template>
             </el-table-column>
-            <el-table-column prop="victimParty" label="受害方" width="200">
+            <el-table-column prop="initiator" label="受害方" width="200">
               <template #default="{ row }">
                 {{ row.victimParty }}
               </template>
@@ -166,7 +170,7 @@
             </el-table-column>
             <el-table-column prop="evidence" label="仲裁原因" min-width="200">
               <template #default="{ row }">
-                {{ row.evidence || '无' }}
+                {{ row.arbitrationReason || '无' }}
               </template>
             </el-table-column>
             <el-table-column label="操作" width="200" fixed="right">
@@ -188,7 +192,7 @@
                   反对
                 </el-button>
                 <el-button
-                    type="primary"
+                    type="info"
                     size="small"
                     @click="viewProposalDetail(scope.row)"
                 >
@@ -197,6 +201,18 @@
               </template>
             </el-table-column>
           </el-table>
+
+          <div class="pagination-container">
+            <el-pagination
+                v-model:current-page="pendingProposalsPagination.page"
+                v-model:page-size="pendingProposalsPagination.size"
+                :page-sizes="[10, 20, 50, 100]"
+                :total="pendingProposals.length"
+                layout="total, sizes, prev, pager, next, jumper"
+                @size-change="handlePendingProposalsSizeChange"
+                @current-change="handlePendingProposalsCurrentChange"
+            />
+          </div>
 
           <el-empty v-if="pendingProposals.length === 0" description="暂无待处理的仲裁提案" />
         </el-card>
@@ -210,16 +226,16 @@
             </div>
           </template>
 
-          <el-table :data="historyProposals" style="width: 100%">
+          <el-table :data="paginatedHistoryProposals" style="width: 100%">
             <el-table-column prop="tradeId" label="交易 ID" width="120" />
             <el-table-column prop="accusedParty" label="被指控方" width="140">
               <template #default="{ row }">
-                {{ formatAddress(row.accusedParty) }}
+                {{ row.accusedParty }}
               </template>
             </el-table-column>
             <el-table-column prop="victimParty" label="受害方" width="140">
               <template #default="{ row }">
-                {{ formatAddress(row.victimParty) }}
+                {{ row.victimParty }}
               </template>
             </el-table-column>
             <el-table-column prop="compensationAmount" label="赔偿金额" width="120">
@@ -242,15 +258,27 @@
             <el-table-column label="操作" width="80">
               <template #default="{ row }">
                 <el-button
-                    type="primary"
+                    type="info"
                     size="small"
-                    @click="viewProposalDetail(row.proposalId)"
+                    @click="viewProposalDetail(row)"
                 >
                   详情
                 </el-button>
               </template>
             </el-table-column>
           </el-table>
+
+          <div class="pagination-container">
+            <el-pagination
+                v-model:current-page="historyProposalsPagination.page"
+                v-model:page-size="historyProposalsPagination.size"
+                :page-sizes="[10, 20, 50, 100]"
+                :total="historyProposals.length"
+                layout="total, sizes, prev, pager, next, jumper"
+                @size-change="handleHistoryProposalsSizeChange"
+                @current-change="handleHistoryProposalsCurrentChange"
+            />
+          </div>
 
           <el-empty v-if="historyProposals.length === 0" description="暂无仲裁历史" />
         </el-card>
@@ -340,6 +368,33 @@ function formatTime(time) {
   })
 }
 
+// 分页事件处理
+function handlePendingDisputesSizeChange(size) {
+  pendingDisputesPagination.value.page = 1
+  pendingDisputesPagination.value.size = size
+}
+
+function handlePendingDisputesCurrentChange(page) {
+  pendingDisputesPagination.value.page = page
+}
+
+function handlePendingProposalsSizeChange(size) {
+  pendingProposalsPagination.value.page = 1
+  pendingProposalsPagination.value.size = size
+}
+
+function handlePendingProposalsCurrentChange(page) {
+  pendingProposalsPagination.value.page = page
+}
+
+function handleHistoryProposalsSizeChange(size) {
+  historyProposalsPagination.value.page = 1
+  historyProposalsPagination.value.size = size
+}
+
+function handleHistoryProposalsCurrentChange(page) {
+  historyProposalsPagination.value.page = page
+}
 
 const router = useRouter()
 const walletStore = useWalletStore()
@@ -361,6 +416,30 @@ const historyProposals = ref([])
 const pendingDisputes = ref([])
 const creatingProposal = ref(false)
 const creatingProposalTradeId = ref(null)
+
+// 分页配置
+const pendingDisputesPagination = ref({ page: 1, size: 10 })
+const pendingProposalsPagination = ref({ page: 1, size: 10 })
+const historyProposalsPagination = ref({ page: 1, size: 10 })
+
+// 分页后的数据
+const paginatedPendingDisputes = computed(() => {
+  const start = (pendingDisputesPagination.value.page - 1) * pendingDisputesPagination.value.size
+  const end = start + pendingDisputesPagination.value.size
+  return pendingDisputes.value.slice(start, end)
+})
+
+const paginatedPendingProposals = computed(() => {
+  const start = (pendingProposalsPagination.value.page - 1) * pendingProposalsPagination.value.size
+  const end = start + pendingProposalsPagination.value.size
+  return pendingProposals.value.slice(start, end)
+})
+
+const paginatedHistoryProposals = computed(() => {
+  const start = (historyProposalsPagination.value.page - 1) * historyProposalsPagination.value.size
+  const end = start + historyProposalsPagination.value.size
+  return historyProposals.value.slice(start, end)
+})
 
 // 计算当前用户是否为委员会成员
 const isCommitteeMember = computed(() => {
@@ -529,9 +608,11 @@ async function handleCreateProposal(dispute) {
           cancelButtonText: '取消',
           inputPattern: /^[0-9]+(\.[0-9]{1,18})?$/,
           inputErrorMessage: '请输入有效的数字',
-          inputValue: '100' // 默认值
+          inputValue: '100', // 默认值
+          confirmButtonClass: 'custom-confirm-btn'
         }
     )
+
 
     creatingProposal.value = true
     creatingProposalTradeId.value = dispute.tradeId
@@ -652,34 +733,40 @@ function viewProposalDetail(row) {
 onMounted(() => {
   loadData()
 })
+</script>
 
-// 测试委员会身份
-async function testCommitteeStatus() {
-  try {
-    const res = await request({
-      url: '/arbitration/check-committee',
-      method: 'get'
-    })
+<style lang="scss">
+// 全局样式，覆盖 Element Plus 的 MessageBox 按钮颜色
+.el-message-box__btns {
+  .el-button--primary {
+    background-color: #e6a23c !important;
+    border-color: #e6a23c !important;
+    color: white !important;
 
-    ElMessage.info(`后端检查结果：${res.data ? '是委员会成员' : '不是委员会成员'}`)
+    &:hover {
+      background-color: #d49435 !important;
+      border-color: #d49435 !important;
+    }
 
-    console.log('🧪 Test result:', {
-      frontend: isCommitteeMember.value,
-      backend: res.data,
-      walletAddress: walletStore.address,
-      membersFromBackend: committeeMembers.value
-    })
-  } catch (error) {
-    ElMessage.error('测试失败：' + error.message)
+    &:active {
+      background-color: #c7892f !important;
+      border-color: #c7892f !important;
+    }
   }
 }
-</script>
+</style>
 
 <style scoped lang="scss">
 .arbitration-page {
   max-width: 1400px;
   margin: 0 auto;
   padding: 20px;
+}
+
+.pagination-container {
+  margin-top: 20px;
+  display: flex;
+  justify-content: flex-end;
 }
 
 .card-header {

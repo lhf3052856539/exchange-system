@@ -169,8 +169,8 @@ async function loadNotifications() {
     console.log('📬 API 返回数据:', res)
     console.log('📬 数据类型:', Array.isArray(res) ? 'Array' : typeof res)
 
-    // ✅ res 已经是数组了（因为 axios 拦截器返回了 response.data.data）
-    const notificationsArray = Array.isArray(res) ? res : []
+    // ✅ 修复：访问 res.data 而不是 res
+    const notificationsArray = Array.isArray(res.data) ? res.data : (Array.isArray(res) ? res : [])
 
     console.log('📬 通知数量:', notificationsArray.length)
 
