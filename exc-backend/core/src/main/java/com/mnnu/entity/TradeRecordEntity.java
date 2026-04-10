@@ -44,6 +44,8 @@ public class TradeRecordEntity {
 
     private BigDecimal exthReward;       // EXTH奖励
 
+    private BigDecimal feeAmount;       //手续费金额
+
     private Integer status;              // 交易状态
 
     private Boolean isPartyAConfirmed;   // A方是否已确认转账

@@ -22,7 +22,7 @@ public class AirdropController implements AirdropApi {
     private final AirdropService airdropService;
 
     @PostMapping("/claim")
-    public JsonVO<AirdropDTO> claimAirdrop(@CurrentUser String address,
+    public JsonVO<Void> claimAirdrop(@CurrentUser String address,
                                            @RequestBody AirdropClaimRequest request) {
         // 验证参数
         if (request.getAmount() == null) {
@@ -53,8 +53,9 @@ public class AirdropController implements AirdropApi {
         for (int i = 0; i < proofBytes.size(); i++) {
             log.info("   Proof[{}] length: {} bytes", i, proofBytes.get(i).length);
         }
+        airdropService.claimAirdrop(address, request.getAmount(), proofBytes);
 
-        return JsonVO.success(airdropService.claimAirdrop(address, request.getAmount(), proofBytes));
+        return JsonVO.success();
     }
 
     @GetMapping("/has-claimed")

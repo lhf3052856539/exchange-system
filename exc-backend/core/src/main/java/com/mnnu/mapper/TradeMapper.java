@@ -12,7 +12,7 @@ import org.apache.ibatis.annotations.Update;
 import java.util.List;
 
 @Mapper
-public interface TradeRecordMapper extends BaseMapper<TradeRecordEntity> {
+public interface TradeMapper extends BaseMapper<TradeRecordEntity> {
 
     /**
      * 根据交易ID查询
@@ -76,4 +76,10 @@ public interface TradeRecordMapper extends BaseMapper<TradeRecordEntity> {
      */
     @Select("SELECT COALESCE(SUM(amount), 0) FROM t_trade_record WHERE status = 4")
     Long sumCompletedAmount();
+
+    /**
+     * 统计指定年份的交易总量
+     */
+    @Select("SELECT COALESCE(SUM(amount_a), 0) FROM trade_record WHERE YEAR(create_time) = #{year} AND status = 2")
+    Long selectSumAmountByYear(@Param("year") int year);
 }

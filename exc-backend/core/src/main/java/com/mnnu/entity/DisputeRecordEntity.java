@@ -1,13 +1,13 @@
 package com.mnnu.entity;
-/**
- * 争议记录实体
- */
 
 import lombok.Data;
 import com.baomidou.mybatisplus.annotation.*;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
+/**
+ * 争议记录实体 (对应 t_dispute_record)
+ */
 @Data
 @TableName("t_dispute_record")
 public class DisputeRecordEntity {
@@ -15,36 +15,88 @@ public class DisputeRecordEntity {
     @TableId(type = IdType.AUTO)
     private Long id;
 
-    private String tradeId;              // 交易 ID
+    /**
+     * 交易 ID
+     */
+    private String tradeId;
 
-    private String initiator;             // 发起方
+    /**
+     * 发起方
+     */
+    private String initiator;
 
-    private String accused;               // 被指控方
+    /**
+     * 被指控方
+     */
+    private String accused;
 
-    private String reason;                // 争议原因
+    /**
+     * 争议原因
+     */
+    private String reason;
 
-    private String evidence;              // 证据（交易哈希等）
+    /**
+     * 证据（交易哈希等）
+     */
+    private String evidence;
 
-    private Integer status;                // 争议状态
+    /**
+     * 争议状态: 0-等待链上确认, 1-处理中, 2-已解决, 3-已驳回, 4-已过期
+     */
+    @TableField("proposal_status")
+    private Integer proposalStatus;
 
-    private String result;                 // 处理结果
+    /**
+     * 处理结果
+     */
+    private String result;
 
-    private String resolver;               // 处理人
+    /**
+     * 处理人
+     */
+    private String resolver;
 
-    private LocalDateTime resolveTime;     // 处理时间
+    /**
+     * 处理时间
+     */
+    private LocalDateTime resolveTime;
 
-    // 仲裁提案相关字段
-    private String proposalId;            // 链上提案 ID
-    private String proposalTxHash;        // 提案创建交易哈希
-    private BigDecimal compensationAmount; // 赔偿金额（USDT）
-    private Integer voteCount;            // 赞成票数
-    private Boolean executed = false;     // 是否已执行
-    private Boolean rejected = false;     // 是否已驳回
-    private Long deadline;                // 投票截止时间
+    // --- 仲裁提案相关字段 ---
 
-    @TableField(fill = FieldFill.INSERT)
+    /**
+     * 链上提案 ID
+     */
+    private String proposalId;
+
+    /**
+     * 提案创建交易哈希
+     */
+    private String proposalTxHash;
+
+    /**
+     * 赔偿金额（USDT）
+     */
+    private BigDecimal compensationAmount;
+
+    /**
+     * 赞成票数
+     */
+    private Integer voteCount;
+
+    /**
+     * 反对票数
+     */
+    private Integer rejectCount;
+
+    /**
+     * 投票截止时间戳 (对应数据库 BIGINT)
+     */
+    private Long deadline;
+
+    /**
+     * 记录创建时间
+     */
     private LocalDateTime createTime;
 
-    @TableField(fill = FieldFill.INSERT_UPDATE)
-    private LocalDateTime updateTime;
+
 }

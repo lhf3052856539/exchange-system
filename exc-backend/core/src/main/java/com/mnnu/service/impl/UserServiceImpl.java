@@ -7,7 +7,7 @@ import com.mnnu.dto.UserTradeStatsDTO;
 import com.mnnu.entity.TradeRecordEntity;
 import com.mnnu.entity.UserEntity;
 import com.mnnu.exception.BusinessException;
-import com.mnnu.mapper.TradeRecordMapper;
+import com.mnnu.mapper.TradeMapper;
 import com.mnnu.mapper.UserMapper;
 import com.mnnu.service.*;
 import com.mnnu.utils.AmountUtil;
@@ -22,6 +22,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -36,10 +37,9 @@ public class UserServiceImpl implements UserService {
 
     private final UserMapper userMapper;
     private final RateService rateService;
-    private final RewardService rewardService;
     private final RedissonClient redissonClient;
-    private final BlockchainService blockchainService; // @Lazy 注解从这里移走了
-    private final TradeRecordMapper tradeRecordMapper;
+    private final BlockchainService blockchainService;
+    private final TradeMapper tradeRecordMapper;
 
     private final JwtUtil jwtUtil;
 
@@ -47,13 +47,11 @@ public class UserServiceImpl implements UserService {
     @Autowired
     public UserServiceImpl(UserMapper userMapper,
                            RateService rateService,
-                           RewardService rewardService,
                            RedissonClient redissonClient,
-                           @Lazy BlockchainService blockchainService, // @Lazy 注解现在在这里！
-                           TradeRecordMapper tradeRecordMapper, JwtUtil jwtUtil) {
+                           @Lazy BlockchainService blockchainService,
+                           TradeMapper tradeRecordMapper, JwtUtil jwtUtil) {
         this.userMapper = userMapper;
         this.rateService = rateService;
-        this.rewardService = rewardService;
         this.redissonClient = redissonClient;
         this.blockchainService = blockchainService;
         this.tradeRecordMapper = tradeRecordMapper;
@@ -65,26 +63,25 @@ public class UserServiceImpl implements UserService {
      */
     @Override
     public String login(String address, String signature) {
-        log.info("Login attempt for address: {}", address);
-
-        // 验证签名
-        boolean isValid = verifySignature(address, signature);
-        if (!isValid) {
+        if (!verifySignature(address, signature)) {
             throw new BusinessException("Invalid signature");
         }
 
-        // 检查用户是否存在，不存在则自动注册
         UserEntity user = userMapper.selectByAddress(address);
+
+        // ✅ 如果本地没有，立即去链上查一次（解决前端刚注册、监听器还没同步的时间差问题）
         if (user == null) {
-            log.info("User not found, auto-registering: {}", address);
+            boolean onChainRegistered = blockchainService.isUserRegisteredOnChain(address);
+            if (!onChainRegistered) {
+                throw new BusinessException("Not registered on chain");
+            }
+
+            // 链上有，本地没有 -> 立即手动同步一次，不让用户等监听器
             register(address);
+            user = userMapper.selectByAddress(address);
         }
 
-        // ✅ 使用 JwtUtil 生成标准的 JWT Token
-        String token = jwtUtil.generateToken(address);
-        log.info("Login successful for address: {}, JWT token generated", address);
-
-        return token;
+        return jwtUtil.generateToken(address);
     }
 
     /**
@@ -100,37 +97,6 @@ public class UserServiceImpl implements UserService {
         }
     }
 
-    /**
-     * 黑名单用户
-     * 数据流向：先更新链下数据库 → 再调用链上合约
-     */
-    @Override
-    @Transactional(rollbackFor = Exception.class)
-    public void blacklistUser(String address, String reason) {
-        UserEntity user = userMapper.selectByAddress(address);
-        if (user == null) {
-            throw new BusinessException("User not found");
-        }
-
-        // 1. 先更新链下数据库
-        user.setIsBlacklisted(true);
-        userMapper.updateById(user);
-
-        // 清除缓存
-        String cacheKey = SystemConstants.RedisKey.USER_INFO + address;
-        redissonClient.getBucket(cacheKey).delete();
-
-        log.info("User blacklisted in database: {}, reason: {}", address, reason);
-
-        // 2. 再调用链上合约（异步，不阻塞主流程）
-        try {
-            blockchainService.blacklistUserOnChain(address);
-            log.info("User blacklisted on chain: {}", address);
-        } catch (Exception e) {
-            log.error("Failed to blacklist user on chain", e);
-            // 链上失败不影响链下状态
-        }
-    }
 
     /**
      * 获取 EXTH 余额（从链上读取，缓存到 Redis）
@@ -161,10 +127,7 @@ public class UserServiceImpl implements UserService {
     }
     /**
      * 注册用户
-     * ✅ 改进：
-     * 1. 不调用链上合约（用户自己在前端调用）
-     * 2. 只负责数据库记录
-     * 3. 异步更新用户类型和余额
+     * ✅ 改进：此方法现在仅作为“占位符”或“手动补偿”，主要注册逻辑应由前端调合约+后端监听完成
      */
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -172,15 +135,15 @@ public class UserServiceImpl implements UserService {
         // 1. 检查是否已注册
         UserEntity existingUser = userMapper.selectByAddress(address);
         if (existingUser != null) {
-            throw new BusinessException("User already registered");
+            return convertToDTO(existingUser); // 已存在则直接返回
         }
 
-        // 2. ✅ 创建数据库记录（不调用链上合约）
+        // 2. ✅ 创建数据库记录（初始状态，等待监听器或异步任务更新链上真实状态）
         UserEntity newUser = new UserEntity();
         newUser.setAddress(address);
-        newUser.setUserType(SystemConstants.UserType.NEW);
+        newUser.setUserType(SystemConstants.UserType.NEW); // 默认为 NEW
         newUser.setNewUserTradeCount(3);
-        newUser.setExthBalance(BigDecimal.ZERO);  // 初始为 0，后续异步从链上同步
+        newUser.setExthBalance(BigDecimal.ZERO);
         newUser.setIsBlacklisted(false);
         LocalDateTime now = LocalDateTime.now();
         newUser.setRegisterTime(now);
@@ -189,13 +152,9 @@ public class UserServiceImpl implements UserService {
         newUser.setUpdateTime(now);
 
         userMapper.insert(newUser);
-        log.info("User registered in database: {}", address);
+        log.info("User record created in database: {}", address);
 
-        // 3. 清除缓存（确保下次查询是最新的）
-        String cacheKey = SystemConstants.RedisKey.USER_INFO + address;
-        redissonClient.getBucket(cacheKey).delete();
-
-        // 4. 异步更新用户类型和余额（不阻塞注册流程）
+        // 3. 异步同步链上真实状态（余额、类型等）
         asyncUpdateUserType(address);
 
         return convertToDTO(newUser);
@@ -216,13 +175,6 @@ public class UserServiceImpl implements UserService {
      */
     @Override
     public UserDTO getUserInfo(String address) {
-        // 优先从缓存获取
-        String cacheKey = SystemConstants.RedisKey.USER_INFO + address;
-        RBucket<UserDTO> bucket = redissonClient.getBucket(cacheKey);
-        UserDTO cached = bucket.get();
-        if (cached != null) {
-            return cached;
-        }
 
         // 从数据库查询
         UserEntity user = userMapper.selectByAddress(address);
@@ -235,9 +187,6 @@ public class UserServiceImpl implements UserService {
         // 构建 DTO
         UserDTO dto = convertToDTO(user);
         dto.setTradeableUt(calculateTradeableUt(address));
-
-        // 缓存
-        bucket.set(dto, 30, TimeUnit.MINUTES);
 
         return dto;
     }
@@ -279,7 +228,6 @@ public class UserServiceImpl implements UserService {
         // 更新缓存
         UserDTO dto = convertToDTO(user);
         dto.setTradeableUt(calculateTradeableUt(address));
-        cacheUserInfo(user);
         log.info("User info cached");
 
         return dto;
@@ -440,9 +388,6 @@ public class UserServiceImpl implements UserService {
 
         userMapper.updateById(user);
 
-        // 清除缓存
-        String cacheKey = SystemConstants.RedisKey.USER_INFO + address;
-        redissonClient.getBucket(cacheKey).delete();
 
         log.debug("Trade count incremented for user: {}", address);
     }
@@ -457,31 +402,20 @@ public class UserServiceImpl implements UserService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void updateExthBalanceOnChain(String address) {
-        try {
-            // 1. 从链上获取最新 EXTH 余额
-            BigDecimal exthBalance = getExthBalance(address);
+        // 从链上查询余额
+        BigInteger balance = blockchainService.getBalance(address,"EXTH").toBigInteger();
 
-            // 2. 更新 Redis 缓存
-            String balanceKey = "user:balance:" + address;
-            redissonClient.getBucket(balanceKey).set(exthBalance.toString(), 5, TimeUnit.MINUTES);
+        // 更新数据库
+        UserEntity user = userMapper.selectByAddress(address);
+        if (user != null) {
+            user.setExthBalance(new BigDecimal(balance));
+            userMapper.updateById(user);
 
-            // 3. 可选：同时更新 MySQL（为了向后兼容）
-            UserEntity user = userMapper.selectByAddress(address);
-            if (user != null) {
-                user.setExthBalance(exthBalance);
-                userMapper.updateById(user);
-
-                // 清除用户信息缓存（下次查询会加载新余额）
-                String cacheKey = SystemConstants.RedisKey.USER_INFO + address;
-                redissonClient.getBucket(cacheKey).delete();
-            }
-
-            log.info("EXTH balance updated for {}: {}", address, exthBalance);
-        } catch (Exception e) {
-            log.error("Failed to update EXTH balance from chain for {}: {}", address, e.getMessage());
-            // 失败时不抛出异常，避免影响业务流程
+            // 清除缓存
+            redissonClient.getBucket("user:info:" + address).delete();
         }
     }
+
 
 
     /**
@@ -500,15 +434,6 @@ public class UserServiceImpl implements UserService {
         }
     }
 
-
-    /**
-     * 缓存用户信息
-     */
-    private void cacheUserInfo(UserEntity user) {
-        String cacheKey = SystemConstants.RedisKey.USER_INFO + user.getAddress();
-        UserDTO dto = convertToDTO(user);
-        redissonClient.getBucket(cacheKey).set(dto, 30, TimeUnit.MINUTES);
-    }
 
     /**
      * 转换为DTO

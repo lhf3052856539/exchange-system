@@ -15,10 +15,22 @@ public interface NotificationService {
      */
     void sendNotification(NotificationDTO notification);
 
+    void sendUserUpgradeNotification(String address, int newType);
+
     /**
      * 发送交易通知
      */
     void sendTradeNotification(String address, String tradeId, String type);
+
+    void sendDaoProposalNotification(String address, String proposalId, String title, String action);
+
+    void sendArbitrationNotification(String address, String tradeId, String role, String action);
+
+    /**
+     * 发送系统通知
+     */
+    void sendSystemNotification(String address, String title, String content);
+
 
     /**
      * 获取用户通知
@@ -40,15 +52,6 @@ public interface NotificationService {
      */
     void deleteNotification(Long id, String address);
 
-    /**
-     * 获取离线消息
-     */
-    List<NotificationDTO> getOfflineMessages(String address);
-
-    /**
-     * 清除离线消息
-     */
-    void clearOfflineMessages(String address);
 
 }
 

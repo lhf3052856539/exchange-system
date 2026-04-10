@@ -25,21 +25,6 @@ public class RabbitConfig {
         return new Queue(SystemConstants.MQQueue.TRADE_MATCH, true);
     }
 
-    /**
-     * 交易确认队列
-     */
-    @Bean
-    public Queue tradeConfirmQueue() {
-        return new Queue(SystemConstants.MQQueue.TRADE_CONFIRM, true);
-    }
-
-    /**
-     * 争议处理队列
-     */
-    @Bean
-    public Queue tradeDisputeQueue() {
-        return new Queue(SystemConstants.MQQueue.TRADE_DISPUTE, true);
-    }
 
     /**
      * 区块链事件队列
@@ -49,29 +34,7 @@ public class RabbitConfig {
         return new Queue(SystemConstants.MQQueue.BLOCKCHAIN_EVENT, true);
     }
 
-    /**
-     * 通知队列
-     */
-    @Bean
-    public Queue notificationQueue() {
-        return new Queue(SystemConstants.MQQueue.NOTIFICATION, true);
-    }
 
-    /**
-     * 空投事件队列
-     */
-    @Bean
-    public Queue airdropEventQueue() {
-        return new Queue(SystemConstants.MQQueue.AIRDROP_EVENT, true);
-    }
-
-    /**
-     * 用户事件队列
-     */
-    @Bean
-    public Queue userEventQueue() {
-        return new Queue(SystemConstants.MQQueue.USER_EVENT, true);
-    }
 
     /**
      * 直接交换机（默认）
@@ -89,37 +52,14 @@ public class RabbitConfig {
         return BindingBuilder.bind(tradeMatchQueue).to(defaultExchange).with(SystemConstants.MQQueue.TRADE_MATCH);
     }
 
-    @Bean
-    public Binding tradeConfirmBinding(Queue tradeConfirmQueue, DirectExchange defaultExchange) {
-        return BindingBuilder.bind(tradeConfirmQueue).to(defaultExchange).with(SystemConstants.MQQueue.TRADE_CONFIRM);
-    }
 
-    @Bean
-    public Binding tradeDisputeBinding(Queue tradeDisputeQueue, DirectExchange defaultExchange) {
-        return BindingBuilder.bind(tradeDisputeQueue).to(defaultExchange).with(SystemConstants.MQQueue.TRADE_DISPUTE);
-    }
 
     @Bean
     public Binding blockchainEventBinding(Queue blockchainEventQueue, DirectExchange defaultExchange) {
         return BindingBuilder.bind(blockchainEventQueue).to(defaultExchange).with(SystemConstants.MQQueue.BLOCKCHAIN_EVENT);
     }
 
-    @Bean
-    public Binding notificationBinding(Queue notificationQueue, DirectExchange defaultExchange) {
-        return BindingBuilder.bind(notificationQueue).to(defaultExchange).with(SystemConstants.MQQueue.NOTIFICATION);
-    }
-
-    @Bean
-    public Binding airdropEventBinding(Queue airdropEventQueue, DirectExchange defaultExchange) {
-        return BindingBuilder.bind(airdropEventQueue).to(defaultExchange).with(SystemConstants.MQQueue.AIRDROP_EVENT);
-    }
-
-    @Bean
-    public Binding userEventBinding(Queue userEventQueue, DirectExchange defaultExchange) {
-        return BindingBuilder.bind(userEventQueue).to(defaultExchange).with(SystemConstants.MQQueue.USER_EVENT);
-    }
-
-    /**
+        /**
      * JSON 消息转换器
      */
     @Bean

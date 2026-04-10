@@ -72,6 +72,12 @@ async function main() {
     await treasure.waitForDeployment();
     console.log("-> Treasure deployed to:", await treasure.getAddress());
 
+    // 设置 Exchange 合约中的金库合约地址
+    console.log("\n9.5 Setting Treasure address in Exchange...");
+    const setTreasureTx = await exchange.setTreasure(await treasure.getAddress());
+    await setTreasureTx.wait();
+    console.log("-> Exchange contract is now connected to Treasure contract.");
+
     //部署多签钱包合约 ️
     console.log("\n10. Deploying MultiSigWallet (Arbitration) contract...");
 
@@ -110,6 +116,12 @@ async function main() {
     const setMultiSigTx = await treasure.setMultiSigWallet(await multiSigWallet.getAddress());
     await setMultiSigTx.wait();
     console.log("-> MultiSigWallet is now authorized in Treasure contract.");
+
+    // 授权 Exchange 合约从金库提取 EXTH 发放奖励
+    console.log("\n11.6 Authorizing Exchange in Treasure...");
+    const authorizeExchangeTx = await treasure.addAuthorizedCaller(await exchange.getAddress());
+    await authorizeExchangeTx.wait();
+    console.log("-> Exchange is now authorized to withdraw EXTH from Treasure.");
 
 
     //5. 部署其他辅助合约

@@ -25,13 +25,10 @@ public class TradeDTO implements Serializable {
     private BigDecimal exthReward;
     private Integer status;
     private String statusDesc;
-    private Boolean isPartyAConfirmed;
-    private Boolean isPartyBConfirmed;
     private LocalDateTime matchTime;
     private LocalDateTime partyAConfirmTime;
     private LocalDateTime partyBConfirmTime;
     private LocalDateTime expireTime;
-    private Boolean isDisputed;
     private String disputedParty;
     private Integer disputeStatus;
     private String txHashA;              // A方转账交易哈希

@@ -20,7 +20,7 @@ public interface DaoApi {
      * @param proposalDTO 提案信息
      * @return 交易哈希
      */
-    JsonVO<String> createProposal(
+    JsonVO<Void> createProposal(
             @CurrentUser String address,
             @RequestBody CreateProposalDTO proposalDTO
     );
@@ -32,7 +32,7 @@ public interface DaoApi {
      * @param support 是否支持
      * @return 交易哈希
      */
-    JsonVO<String> vote(
+    JsonVO<Void> vote(
             @CurrentUser String address,
             @RequestParam BigInteger proposalId,
             @RequestParam Boolean support
@@ -43,7 +43,7 @@ public interface DaoApi {
      * @param proposalId 提案 ID
      * @return 交易哈希
      */
-    JsonVO<String> queueProposal(@RequestParam BigInteger proposalId);
+    JsonVO<Void> queueProposal(@RequestParam BigInteger proposalId);
 
     /**
      * 执行提案
@@ -51,7 +51,7 @@ public interface DaoApi {
      * @param eta 公示期执行时间
      * @return 交易哈希
      */
-    JsonVO<String> executeProposal(
+    JsonVO<Void> executeProposal(
             @RequestParam BigInteger proposalId,
             @RequestParam BigInteger eta
     );
@@ -61,7 +61,7 @@ public interface DaoApi {
      * @param proposalId 提案 ID
      * @return 交易哈希
      */
-    JsonVO<String> cancelProposal(@RequestParam BigInteger proposalId);
+    JsonVO<Void> cancelProposal(@CurrentUser String address, @RequestParam BigInteger proposalId);
 
     /**
      * 获取提案详情

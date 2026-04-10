@@ -1,49 +1,45 @@
 package com.mnnu.service;
 
+import com.mnnu.dto.DisputeDTO;
+import com.mnnu.dto.DisputeParam;
 import com.mnnu.dto.ProposalDTO;
+import com.mnnu.entity.DisputeRecordEntity;
 
 import java.math.BigInteger;
 import java.util.List;
 
 public interface MultiSigWalletService {
 
+
     String getMultiSigWalletAddress();
 
     List<String> getCommitteeMembers();
 
-    String createProposal(
-            BigInteger tradeId,
-            String accusedParty,
-            String victimParty,
-            BigInteger compensationAmount,
-            String reason
-    );
-
-    String voteProposal(BigInteger proposalId, boolean support);
-
-    String executeProposal(BigInteger proposalId);
     /**
-     * 发送已签名的原始交易
+     * 创建仲裁提案（包含业务校验）
      */
-    String sendRawTransaction(String signedTxHex);
+    void createArbitrationProposal(String creatorAddress, DisputeParam param);
 
-    ProposalDTO getProposalDetails(BigInteger proposalId);
+    /**
+     * 投票（包含业务校验）
+     */
+    void voteArbitrationProposal(String voterAddress, BigInteger proposalId, boolean support);
+
+
+    String finalizeProposal(BigInteger proposalId);
+
+    DisputeDTO getProposalDetails(BigInteger proposalId);
 
     boolean isCommitteeMember(String address);
 
     /**
-     * 获取提案总数
+     * 获取待处理的争议列表（对应链上 Pending 状态的提案）
      */
-    BigInteger getProposalCount();
+    List<DisputeRecordEntity> getPendingDisputes();
 
-    /**
-     * 获取所有待处理的提案（未执行且未拒绝）
-     */
-    List<ProposalDTO> getPendingProposals();
+    List<DisputeRecordEntity> getPendingProposals();
 
-    /**
-     * 获取仲裁历史（已执行或已拒绝的提案）
-     */
-    List<ProposalDTO> getHistoryProposals();
+    List<DisputeRecordEntity> getHistoryProposals();
+
 
 }

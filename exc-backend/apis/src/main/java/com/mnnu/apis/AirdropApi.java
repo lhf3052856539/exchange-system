@@ -22,7 +22,7 @@ public interface AirdropApi {
      * @param request
      * @return
      */
-    JsonVO<AirdropDTO> claimAirdrop(@CurrentUser String address,
+    JsonVO<Void> claimAirdrop(@CurrentUser String address,
                                     @RequestBody AirdropClaimRequest request);
 
 

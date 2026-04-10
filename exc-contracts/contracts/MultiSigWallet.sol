@@ -22,6 +22,10 @@ contract MultiSigWallet is Ownable, ReentrancyGuard {
     IERC20 public usdtToken;
     IERC20 public exthToken;
 
+    uint8 public constant STATUS_PENDING = 0;
+    uint8 public constant STATUS_EXECUTED = 1;
+    uint8 public constant STATUS_REJECTED = 2;
+
     mapping(address => bool) public isCommitteeMember;
     address[] public committeeMembers;
 
@@ -32,9 +36,9 @@ contract MultiSigWallet is Ownable, ReentrancyGuard {
         uint256 compensationAmount;
         string reason;
         uint256 voteCount;
+        uint256 rejectCount;
         mapping(address => bool) hasVoted;
-        bool executed;
-        bool rejected;
+        uint8 status;
         uint256 createdAt;
         uint256 deadline;
     }
@@ -116,6 +120,7 @@ contract MultiSigWallet is Ownable, ReentrancyGuard {
         proposal.victimParty = _victimParty;
         proposal.compensationAmount = _compensationAmount;
         proposal.reason = _reason;
+        proposal.status = STATUS_PENDING;
         proposal.createdAt = block.timestamp;
         proposal.deadline = block.timestamp + VOTING_PERIOD;
 
@@ -128,7 +133,7 @@ contract MultiSigWallet is Ownable, ReentrancyGuard {
         require(_proposalId < proposalCount, "Invalid proposal ID");
 
         Proposal storage proposal = proposals[_proposalId];
-        require(!proposal.executed && !proposal.rejected, "Proposal already resolved");
+        require(proposal.status == STATUS_PENDING, "Proposal already resolved");
         require(block.timestamp < proposal.deadline, "Voting period ended");
         require(!proposal.hasVoted[msg.sender], "Already voted");
 
@@ -138,31 +143,55 @@ contract MultiSigWallet is Ownable, ReentrancyGuard {
             proposal.voteCount++;
 
             if (proposal.voteCount >= REQUIRED_SIGNATURES) {
+                proposal.status = STATUS_EXECUTED;
                 executeProposal(_proposalId);
             }
-        } else {
-            proposal.rejected = true;
-            emit ProposalRejected(_proposalId);
+        }else {
+            proposal.rejectCount++;
+            // 反对票达到阈值（2票），立即拒绝
+            if (proposal.rejectCount >= REQUIRED_SIGNATURES) {
+                proposal.status = STATUS_REJECTED;
+                emit ProposalRejected(_proposalId);
+            }
         }
 
         emit VoteCast(_proposalId, msg.sender, _support);
+    }
+    /**
+     * @notice finalize 提案：处理超时未通过的提案
+     * @dev 任何人都可以调用此函数来“清理”过期的提案，将其状态改为 REJECTED
+     */
+    function finalizeProposal(uint256 _proposalId) external {
+        require(_proposalId < proposalCount, "Invalid proposal ID");
+        Proposal storage proposal = proposals[_proposalId];
+
+        require(proposal.status == STATUS_PENDING, "Already finalized");
+        require(block.timestamp > proposal.deadline, "Voting still active");
+
+        //时间到了，票数不够，直接拒绝
+        proposal.status = STATUS_REJECTED;
+        emit ProposalRejected(_proposalId);
     }
 
     function executeProposal(uint256 _proposalId) public nonReentrant {
         require(_proposalId < proposalCount, "Invalid proposal ID");
         Proposal storage proposal = proposals[_proposalId];
-        require(!proposal.executed && !proposal.rejected, "Proposal already resolved");
+        require(proposal.status == STATUS_PENDING, "Proposal already resolved");
         require(proposal.voteCount >= REQUIRED_SIGNATURES, "Insufficient votes");
 
-        proposal.executed = true;
+        // 标记为已执行，防止重入攻击重复执行
+        proposal.status = STATUS_EXECUTED;
 
         exchangeContract.blacklistUser(proposal.accusedParty);
+
         // 直接调用金库的专门赔付函数
         treasureContract.payCompensation(
             address(usdtToken),
             proposal.victimParty,
             proposal.compensationAmount
         );
+
+        exchangeContract.markTradeAsResolved(proposal.tradeId);
 
         emit ProposalExecuted(_proposalId, proposal.accusedParty, proposal.victimParty);
     }
@@ -174,8 +203,9 @@ contract MultiSigWallet is Ownable, ReentrancyGuard {
         uint256 compensationAmount,
         string memory reason,
         uint256 voteCount,
-        bool executed,
-        bool rejected,
+        uint256 rejectCount,
+        uint8 status,
+        uint256 createdAt,
         uint256 deadline
     ) {
         require(_proposalId < proposalCount, "Invalid proposal ID");
@@ -187,8 +217,9 @@ contract MultiSigWallet is Ownable, ReentrancyGuard {
         proposal.compensationAmount,
         proposal.reason,
         proposal.voteCount,
-        proposal.executed,
-        proposal.rejected,
+        proposal.rejectCount,
+        proposal.status,
+        proposal.createdAt,
         proposal.deadline
         );
     }

@@ -24,21 +24,18 @@ contract Dao {
 
     // --- 数据结构 ---
 
-    enum ProposalState { Pending, Active, Succeeded, Defeated, Queued, Executed, Canceled }
-
     struct Proposal {
         string description;
         uint256 deadline;
         uint256 forVotes;
         uint256 againstVotes;
-        bool executed;
-        bool canceled;
+        uint8 status;
         address target;
         uint256 value;
         bytes callData;
         bytes32 timelockId;
         uint256 snapshotBlock;
-        uint256 eta; // Expected Time of Arrival (执行时间)
+        uint256 eta; // 可执行时间
     }
 
     // --- 事件 ---
@@ -75,6 +72,7 @@ contract Dao {
         newProposal.target = _target;
         newProposal.value = _value;
         newProposal.callData = _callData;
+        newProposal.status = 0;//待开始
 
         // 在单独的 mapping 中记录提案人
         proposalProposers[proposalId] = msg.sender;
@@ -85,6 +83,7 @@ contract Dao {
 
     function vote(uint256 _proposalId, bool _support) external {
         Proposal storage p = proposals[_proposalId];
+        require(p.status == 0 || p.status == 1, "Voting not allowed");
         require(block.timestamp < p.deadline, "Voting period has ended");
         require(!hasVoted[_proposalId][msg.sender], "Already voted");
 
@@ -97,16 +96,20 @@ contract Dao {
         } else {
             p.againstVotes += weight;
         }
+        p.status = 1;//投票中
 
         emit VoteCast(_proposalId, msg.sender, _support, weight);
     }
 
     function queue(uint256 _proposalId) external {
         Proposal storage p = proposals[_proposalId];
-        require(state(_proposalId) == ProposalState.Succeeded, "Proposal not successful");
+        require(block.timestamp >= p.deadline, "Voting not finished");
+        require(p.status == 2, "Proposal not succeeded");
+        require(p.status != 4, "Already queued");
 
         uint256 eta = block.timestamp + timelock.minDelay();
         p.eta = eta;
+
 
         // 命令 Timelock 将此交易排队（eta 在 queueTransaction 内部计算）
         bytes32 txId = timelock.queueTransaction(p.target, p.value, p.callData);
@@ -114,17 +117,20 @@ contract Dao {
 
         // 通过查询获取 eta 值
         p.eta = timelock.timestamps(txId);
+        p.status = 4;//已加入队列
 
         emit ProposalQueued(_proposalId, p.eta);
     }
 
     function execute(uint256 _proposalId) external payable {
         Proposal storage p = proposals[_proposalId];
-        require(state(_proposalId) == ProposalState.Queued, "Proposal not in queue");
+        require(p.status == 4, "Proposal not in queue");
+        require(block.timestamp >= p.eta, "Timelock not expired");
 
         // 命令Timelock执行此交易
         timelock.executeTransaction{value: p.value}(p.target, p.value, p.callData, p.eta);
-        p.executed = true;
+
+        p.status = 5;//已执行
 
         emit ProposalExecuted(_proposalId);
     }
@@ -132,42 +138,40 @@ contract Dao {
     function cancel(uint256 _proposalId) external {
         Proposal storage p = proposals[_proposalId];
 
-        //核心修改 3：通过单独的 mapping 来验证权限
+        //核心修改 ：通过单独的 mapping 来验证权限
         require(msg.sender == proposalProposers[_proposalId], "Only proposer can cancel");
 
         // 只能在特定状态下取消
-        ProposalState currentState = state(_proposalId);
+        uint8 currentState = state(_proposalId);
         require(
-            currentState == ProposalState.Pending ||
-            currentState == ProposalState.Active,
+            currentState == 0 ||
+            currentState == 1,
             "Can only cancel pending or active proposals"
         );
 
-        p.canceled = true;
+        p.status = 6;//已取消
         emit ProposalCanceled(_proposalId);
     }
 
     // --- 查询功能 ---
 
-    function state(uint256 _proposalId) public view returns (ProposalState) {
-        Proposal storage p = proposals[_proposalId];
-        if (p.executed) return ProposalState.Executed;
-        if (p.canceled) return ProposalState.Canceled;
-        if (block.timestamp >= p.deadline) {
-            if (p.forVotes > p.againstVotes) {
-                // 检查是否已在Timelock队列中
-                if (p.timelockId == bytes32(0)) {
-                    return ProposalState.Succeeded;
-                }
-                // 检查Timelock中的交易是否到期可执行
-                if (block.timestamp >= p.eta) {
-                    return ProposalState.Queued; // 严格来说是Ready for Execution
-                }
-                return ProposalState.Queued;
-            } else {
-                return ProposalState.Defeated;
-            }
-        }
-        return ProposalState.Active;
+    function state(uint256 _proposalId) public view returns (uint8) {
+        return proposals[_proposalId].status;
     }
+
+    /**
+     * 检查投票是否通过（截止时间到后调用）
+     */
+    function checkVoteResult(uint256 _proposalId) external {
+        Proposal storage p = proposals[_proposalId];
+        require(block.timestamp >= p.deadline, "Voting not finished");
+        require(p.status == 0 || p.status == 1, "Invalid state");
+
+        if (p.forVotes > p.againstVotes) {
+            p.status = 2;//投票通过
+        } else {
+            p.status = 3;//投票失败
+        }
+    }
+
 }

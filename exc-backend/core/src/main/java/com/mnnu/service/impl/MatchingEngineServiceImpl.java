@@ -27,7 +27,7 @@ public class MatchingEngineServiceImpl implements MatchingEngineService {
     private final UserService userService;
     private final RabbitTemplate rabbitTemplate;
 
-    // 内存中的等待队列（也可以用 Redis ZSET 实现）
+    // 内存中的等待队列
     private final ConcurrentHashMap<String, QueueItem> waitingQueue = new ConcurrentHashMap<>();
 
     @Autowired

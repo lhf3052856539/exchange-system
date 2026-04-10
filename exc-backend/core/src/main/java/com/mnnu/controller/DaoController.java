@@ -30,53 +30,56 @@ public class DaoController implements DaoApi {
 
     @Override
     @PostMapping("/proposal/create")
-    public JsonVO<String> createProposal(
+    public JsonVO<Void> createProposal(
             @CurrentUser String address,
             @RequestBody CreateProposalDTO proposalDTO
     ) {
         log.info("Create proposal from address: {}", address);
-        String txHash = daoService.createProposal(proposalDTO,address);
-        return JsonVO.success(txHash);
+        daoService.createProposal(proposalDTO,address);
+        return JsonVO.success();
     }
 
     @Override
     @PostMapping("/proposal/vote")
-    public JsonVO<String> vote(
+    public JsonVO<Void> vote(
             @CurrentUser String address,
             @RequestParam BigInteger proposalId,
             @RequestParam Boolean support
     ) {
-        log.info("Vote on proposal {} from address {}: {}", proposalId, address, support);
-        String txHash = daoService.vote(proposalId, support);
-        return JsonVO.success(txHash);
+        log.info("Vote on proposal {} from address: {}", proposalId, address);
+        daoService.vote(proposalId, support, address);
+        return JsonVO.success();
     }
 
     @Override
     @PostMapping("/proposal/queue")
-    public JsonVO<String> queueProposal(@RequestParam BigInteger proposalId) {
+    public JsonVO<Void> queueProposal(@RequestParam BigInteger proposalId) {
         log.info("Queue proposal: {}", proposalId);
-        String txHash = daoService.queueProposal(proposalId);
-        return JsonVO.success(txHash);
+        daoService.queueProposal(proposalId);
+        return JsonVO.success();
     }
 
     @Override
     @PostMapping("/proposal/execute")
-    public JsonVO<String> executeProposal(
+    public JsonVO<Void> executeProposal(
             @RequestParam BigInteger proposalId,
             @RequestParam(required = false) BigInteger eta
     ) {
         log.info("Execute proposal: {}, eta (ignored): {}", proposalId);
-        String txHash = daoService.executeProposal(proposalId,eta);
-        return JsonVO.success(txHash);
+        daoService.executeProposal(proposalId,eta);
+        return JsonVO.success();
     }
 
 
     @Override
     @PostMapping("/proposal/cancel")
-    public JsonVO<String> cancelProposal(@RequestParam BigInteger proposalId) {
-        log.info("Cancel proposal: {}", proposalId);
-        String txHash = daoService.cancelProposal(proposalId);
-        return JsonVO.success(txHash);
+    public JsonVO<Void> cancelProposal(
+            @CurrentUser String address,
+            @RequestParam BigInteger proposalId
+    ) {
+        log.info("Cancel proposal {} from address: {}", proposalId, address);
+        daoService.cancelProposal(proposalId, address);
+        return JsonVO.success();
     }
 
     @Override

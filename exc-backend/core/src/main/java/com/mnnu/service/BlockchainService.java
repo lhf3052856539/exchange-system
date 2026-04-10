@@ -16,10 +16,6 @@ public interface BlockchainService {
      */
     Object getContract(String contractName);
 
-    /**
-     * 发送交易
-     */
-    String sendTransaction(String contractName, String methodName, Object... params);
 
     /**
      * 查询交易
@@ -37,24 +33,16 @@ public interface BlockchainService {
     void subscribeToEvents();
 
     /**
+     * 检查用户在链上 Exchange 合约中是否已注册
+     */
+    boolean isUserRegisteredOnChain(String address);
+
+    /**
      * 获取用户余额
      */
     BigDecimal getBalance(String address, String tokenSymbol);
 
-    /**
-     * 创建交易对（链上）
-     */
-    String createTradePairOnChain(String partyA, String partyB, BigDecimal amount);
 
-    /**
-     * 拉黑用户（链上）
-     */
-    String blacklistUserOnChain(String user);
-
-    /**
-     * 发放奖励
-     */
-    String distributeRewardOnChain(String user, BigInteger amount);
 
     /**
      * 从链上同步用户 EXTH 余额到数据库
@@ -62,14 +50,10 @@ public interface BlockchainService {
     void updateExthBalanceOnChain(String address);
 
     /**
-     * 从金库赔偿损失方（ETH）
+     * 链上链下数据对账（修复不一致状态）
      */
-    String compensateFromTreasure(String victimAddress, BigInteger amount);
+    void reconcilePendingTrades();
 
-    /**
-     * 从金库赔偿损失方（ERC20 代币）
-     */
-    String compensateERC20FromTreasure(String tokenAddress, String victimAddress, BigInteger amount);
 
     /**
      * 获取 USDT 合约地址
@@ -87,11 +71,6 @@ public interface BlockchainService {
     String getExchangeContractAddress();
 
     /**
-     * 收取手续费
-     */
-    String collectFee(BigInteger tradeId, BigInteger feeAmount);
-
-    /**
      * 检查用户对 Exchange 合约的 EXTH 授权额度
      */
     java.math.BigInteger checkExthAllowance(String owner, String spender) throws Exception;
@@ -100,14 +79,6 @@ public interface BlockchainService {
      * 授权 Exchange 合约使用 EXTH 代币
      */
     String approveExth(String spender, BigInteger amount) throws Exception;
-
-
-    String claimAirdropOnChain(String address, BigInteger amount, List<byte[]> merkleProof);
-
-    /**
-     * 完成交易（调用 Exchange 合约）
-     */
-    String completeTrade(BigInteger tradeId);
 
     /**
      * 获取 Treasure 金库合约地址

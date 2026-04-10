@@ -145,21 +145,20 @@ public class DaoWrapper extends BaseWrapper{
      * 获取提案详情
      */
     public ProposalInfo getProposal(BigInteger proposalId) throws Exception {
-        Tuple12<String, BigInteger, BigInteger, BigInteger, Boolean, Boolean, String, BigInteger, byte[], byte[], BigInteger, BigInteger> result = contract.proposals(proposalId).send();
+        Tuple11<String, BigInteger, BigInteger, BigInteger, BigInteger, String, BigInteger, byte[], byte[], BigInteger, BigInteger> result = contract.proposals(proposalId).send();
 
         return new ProposalInfo(
                 result.component1(),   // description
                 result.component2(),   // deadline
                 result.component3(),   // yesVotes
                 result.component4(),   // noVotes
-                result.component5() != null && result.component5(),   // executed
-                result.component6() != null && result.component6(),   // canceled
-                result.component7(),   // targetContract
-                result.component8(),   // value
-                result.component9(),   // callData
-                result.component10(),  // timelockId
-                result.component12(),  // ✅ eta (component12)
-                result.component11()   // ✅ snapshotBlock (component11)
+                result.component5().intValue() ,   // status
+                result.component6(),   // targetContract
+                result.component7(),   // value
+                result.component8(),   // callData
+                result.component9(),  // timelockId
+                result.component10(),   // ✅ snapshotBlock (component11)
+                result.component11() // ✅ eta (component12)
         );
     }
 
@@ -204,21 +203,36 @@ public class DaoWrapper extends BaseWrapper{
         return contract.proposalExecutedEventFlowable(startBlock, endBlock);
     }
 
-    // 🔥 新增：监听 VoteCast 事件
+    // 监听 VoteCast 事件
     public Flowable<Dao.VoteCastEventResponse> voteCastEventFlowable(
             DefaultBlockParameterName startBlock,
             DefaultBlockParameterName endBlock) {
         return contract.voteCastEventFlowable(startBlock, endBlock);
     }
 
-    // 🔥 新增：监听 ProposalCreated 事件
+    // 监听 ProposalCreated 事件
     public Flowable<Dao.ProposalCreatedEventResponse> proposalCreatedEventFlowable(
             DefaultBlockParameterName startBlock,
             DefaultBlockParameterName endBlock) {
         return contract.proposalCreatedEventFlowable(startBlock, endBlock);
     }
 
-    // 🔥 新增：获取交易收据中的 VoteCast 事件
+    // 监听 ProposalQueued 事件
+    public Flowable<Dao.ProposalQueuedEventResponse> proposalQueuedEventFlowable(
+            DefaultBlockParameterName startBlock,
+            DefaultBlockParameterName endBlock) {
+        return contract.proposalQueuedEventFlowable(startBlock, endBlock);
+    }
+
+    // 监听 ProposalCanceled 事件
+    public Flowable<Dao.ProposalCanceledEventResponse> proposalCanceledEventFlowable(
+            DefaultBlockParameterName startBlock,
+            DefaultBlockParameterName endBlock) {
+        return contract.proposalCanceledEventFlowable(startBlock, endBlock);
+    }
+
+
+    // 新增：获取交易收据中的 VoteCast 事件
     public List<Dao.VoteCastEventResponse> getVoteCastEvents(TransactionReceipt receipt) {
         return Dao.getVoteCastEvents(receipt);
     }
@@ -239,8 +253,7 @@ public class DaoWrapper extends BaseWrapper{
         public BigInteger deadline;
         public BigInteger yesVotes;
         public BigInteger noVotes;
-        public boolean executed;
-        public boolean queued;
+        public Integer status;
         public String targetContract;
         public BigInteger value;
         public byte[] callData;
@@ -251,15 +264,14 @@ public class DaoWrapper extends BaseWrapper{
         public BigInteger startTime;
 
         public ProposalInfo(String description, BigInteger deadline, BigInteger yesVotes,
-                            BigInteger noVotes, boolean executed, boolean queued,
+                            BigInteger noVotes, Integer status,
                             String targetContract, BigInteger value, byte[] callData,
                             byte[] additionalData, BigInteger eta, BigInteger snapshotBlock) {
             this.description = description;
             this.deadline = deadline;
             this.yesVotes = yesVotes;
             this.noVotes = noVotes;
-            this.executed = executed;
-            this.queued = queued;
+            this.status = status;
             this.targetContract = targetContract;
             this.value = value;
             this.callData = callData;

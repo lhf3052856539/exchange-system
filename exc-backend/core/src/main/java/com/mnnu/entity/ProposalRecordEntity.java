@@ -16,7 +16,6 @@ public class ProposalRecordEntity {
     private BigDecimal value = BigDecimal.ZERO;
     private String callData;
     private Integer status;
-    private Long blockNumber;
     private Long eta;
     private Long snapshotBlock;
     private BigDecimal yesVotes = BigDecimal.ZERO;

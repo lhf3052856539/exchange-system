@@ -7,6 +7,7 @@ import './node_modules/@openzeppelin/contracts-5.1.0/utils/ReentrancyGuard.sol';
 import './EXTH.sol';
 import './USDT.sol';
 import './MultiSigWallet.sol';
+import './Treasure.sol'; // 导入金库合约
 
 /**
  * @title 去中心化兑换系统合约
@@ -19,6 +20,7 @@ contract Exchange is Ownable, ReentrancyGuard {
     EXTH public exthToken;
     USDT public usdtToken;
     MultiSigWallet public multiSigWallet;
+    Treasure public treasure; // 金库合约地址
     mapping(address => bool) public authorizedCallers; //授权调用者
 
     // 手续费：万分之一
@@ -37,7 +39,6 @@ contract Exchange is Ownable, ReentrancyGuard {
         UserType userType;
         uint256 newUserTradeCount; // 新用户还需要作为率先转账方的次数
         uint256 exthBalance; // 缓存的EXTH余额，用于计算可交易额度
-        uint256 lastUpdateTime; // 最后更新时间
         bool isBlacklisted; // 是否被拉黑
     }
 
@@ -47,17 +48,20 @@ contract Exchange is Ownable, ReentrancyGuard {
         address partyB; // 履约方
         uint256 amount; // 交易额度（UT）
         uint256 exthReward; // EXTH奖励数量
-        uint256 timestamp;
-        bool isCompleted;
-        bool isDisputed;
+        uint256 feeAmount; // 手续费金额（EXTH）
+        uint256 createTime; //交易创建时的区块时间
+        uint256 completeTime; // 记录完成或解决争议的时间
+        // 0: Created, 1: PartyA Confirmed, 2: PartyB Confirmed, 3: Completed, 4: Cancell,5:dispute,6:Resolved
+        uint8 state;
         address disputedParty; // 被争议方
     }
 
     // 奖励减半相关
     uint256 public constant INITIAL_REWARD = 0.05 * 10**6; // 0.05 EXTH (精度6)
-    uint256 public constant REWARD_HALVING_INTERVAL = 100_000_000; // 1亿 UT
-    uint256 public totalUTVolume; // 总交易量
-    uint256 public currentReward = INITIAL_REWARD; // 当前奖励数量
+    uint256 public constant REWARD_HALVING_INTERVAL = 1000_000_000; // 1亿 UT
+    uint256 public totalUTVolume;      // 当年累计交易量
+    uint256 public currentReward;      // 当前奖励额度
+    uint256 public lastRewardYear;     //上一次结算奖励的年份
 
     // 用户映射
     mapping(address => User) public users;
@@ -78,7 +82,10 @@ contract Exchange is Ownable, ReentrancyGuard {
     event MatchRequested(bytes32 indexed requestId, address indexed user, uint256 amount, uint256 timestamp);
     event FeeCollected(uint256 indexed tradeId, address indexed feePayerA,address indexed feePayerB, uint256 feeAmount);
     event DisputeSubmittedToArbitration(uint256 indexed tradeId, address indexed initiator, address indexed accusedParty);
-
+    event PartyAConfirmed(uint256 indexed tradeId,address indexed party,string txHash);
+    event PartyBConfirmed(uint256 indexed tradeId,address indexed party,string txHash);
+    event TradeCancelled(uint256 indexed tradeId);
+    event TradeResolved(uint256 indexed tradeId);
     // ==================== 修饰器 ====================
 
     modifier notBlacklisted(address user) {
@@ -96,13 +103,56 @@ contract Exchange is Ownable, ReentrancyGuard {
     constructor(address _exthToken, address _usdtToken) Ownable(msg.sender) {
         exthToken = EXTH(_exthToken);
         usdtToken = USDT(_usdtToken);
+        lastRewardYear = _getCurrentYear(); // 初始化部署年份
     }
 
     // ==================== 用户管理函数 ====================
 
     /**
-     * @notice 更新用户类型（基于 EXTH 余额）
-     * @dev 当用户账户中的 EXTH 余额为 900 时，晋升为种子用户
+     * @notice 注册用户
+     * @dev 初始化用户状态：EXTH余额为0，新用户率先转账次数为3
+     */
+    function registerUser() external {
+        User storage userData = users[msg.sender];
+
+        // 防止重复注册覆盖已有数据
+        require(userData.newUserTradeCount == 0 && userData.userType == UserType(0), "Already registered");
+
+        userData.userType = UserType.NEW;
+        userData.newUserTradeCount = 3;
+        userData.exthBalance = 0;
+        userData.isBlacklisted = false;
+
+        emit UserUpgraded(msg.sender, UserType.NEW);
+    }
+
+    /**
+     * @notice 批量设置种子用户状态
+     * @dev 仅更新链上状态：类型设为 SEED，率先转账次数清零。
+     *      代币分发应由部署脚本通过 Treasure 合约完成。
+     * @param seedUsers 种子用户地址列表
+     */
+    function initSeedUsers(address[] calldata seedUsers) external onlyOwner {
+        for (uint256 i = 0; i < seedUsers.length; i++) {
+            address user = seedUsers[i];
+            User storage userData = users[user];
+
+            // 设置为种子用户
+            userData.userType = UserType.SEED;
+
+            // 率先转账次数清零
+            userData.newUserTradeCount = 0;
+
+            // 同步余额
+            userData.exthBalance = exthToken.balanceOf(user);
+
+            emit UserUpgraded(user, UserType.SEED);
+        }
+    }
+
+
+    /**
+     * @notice 更新用户类型（基于 EXTH 余额和新手任务进度）
      * @param user 用户地址
      */
     function updateUserType(address user) public {
@@ -111,17 +161,21 @@ contract Exchange is Ownable, ReentrancyGuard {
         uint256 exthBalance = exthToken.balanceOf(user);
         userData.exthBalance = exthBalance;
 
-        if (exthBalance >= 900 * 10**6) { // 900 EXTH (精度 6)
+        // 只要 newUserTradeCount > 0，强制保持 NEW 身份
+        if (userData.newUserTradeCount > 0) {
+            if (userData.userType != UserType.NEW) {
+                userData.userType = UserType.NEW;
+                emit UserUpgraded(user, UserType.NEW);
+            }
+        }
+        // 新手任务完成后，根据余额判定是 SEED 还是 NORMAL
+        else if (exthBalance >= 900 * 10**6) {
             if (userData.userType != UserType.SEED) {
                 userData.userType = UserType.SEED;
                 emit UserUpgraded(user, UserType.SEED);
             }
-        } else if (userData.userType == UserType.NEW) {
-            // 新用户且余额不足 900，升级为 NORMAL
-            userData.userType = UserType.NORMAL;
-            emit UserUpgraded(user, UserType.NORMAL);
-        } else {
-            // 普通用户但余额不足，降级为 NORMAL
+        }
+        else {
             if (userData.userType != UserType.NORMAL) {
                 userData.userType = UserType.NORMAL;
                 emit UserUpgraded(user, UserType.NORMAL);
@@ -180,11 +234,18 @@ contract Exchange is Ownable, ReentrancyGuard {
     function createTradePair(
         address partyA,
         address partyB,
-        uint256 amount
+        uint256 amount,
+        uint256 _feeAmount  // 手续费
     ) external  notBlacklisted(partyA) notBlacklisted(partyB) returns (uint256) {
 
         // 简化：不再检查用户类型和新手次数，完全信任后端传入的参数
         // 后端已经决定了谁是 partyA（率先转账方）
+
+        // 计算当前奖励（根据总交易量减半）
+        _checkRewardHalving();
+
+        // 根据交易量动态计算奖励：每 1UT 奖励 currentReward（0.05 EXTH）
+        uint256 reward = amount * currentReward;
 
         // 创建交易对
         tradePairCounter++;
@@ -192,10 +253,11 @@ contract Exchange is Ownable, ReentrancyGuard {
         partyA: partyA,
         partyB: partyB,
         amount: amount,
-        exthReward: currentReward,
-        timestamp: block.timestamp,
-        isCompleted: false,
-        isDisputed: false,
+        exthReward: reward, // 使用动态计算的奖励
+        feeAmount: _feeAmount, // 手续费
+        createTime: block.timestamp,
+        completeTime: 0,
+        state: 0,
         disputedParty: address(0)
         });
 
@@ -203,50 +265,99 @@ contract Exchange is Ownable, ReentrancyGuard {
 
         return tradePairCounter;
     }
+    function confirmPartyA(uint256 tradeId, string calldata txHash) external {
+        TradePair storage trade = tradePairs[tradeId];
+        require(msg.sender == trade.partyA, "Not party A");
+        require(trade.state == 0, "Invalid state or already confirmed"); // 只有 state 为 0 才能确认
+        require(block.timestamp <= trade.createTime + 18000, "Trade expired");
+
+        trade.state = 1; // Update state to PartyA Confirmed
+
+        emit PartyAConfirmed(tradeId, msg.sender, txHash);
+    }
+    function confirmPartyB(uint256 tradeId, string calldata txHash) external {
+        TradePair storage trade = tradePairs[tradeId];
+        require(msg.sender == trade.partyB, "Not party B");
+        require(trade.state == 1, "Waiting for Party A confirmation"); // 只有 state 为 1 才能确认
+        require(block.timestamp <= trade.createTime + 18000, "Trade expired");
+
+        trade.state = 2; // Update state to PartyB Confirmed
+
+        emit PartyBConfirmed(tradeId, msg.sender, txHash);
+
+    }
+
+    function cancelTrade(uint256 tradeId) external {
+        TradePair storage trade = tradePairs[tradeId];
+        require(msg.sender == trade.partyA || msg.sender == trade.partyB, "Not authorized");
+        require(trade.state < 3, "Trade already completed");
+        require(block.timestamp <= trade.createTime + 18000, "Trade expired");
+
+        trade.state = 4; // Cancelled
+        trade.completeTime = block.timestamp;
+        emit TradeCancelled(tradeId);
+    }
 
 
     /**
-     * @notice 完成交易（由后端调用）
+     * @notice 完成交易
      * @param tradeId 交易 ID
      * @return 是否成功完成
      */
     function completeTrade(uint256 tradeId) external  nonReentrant returns (bool) {
         require(tradeId > 0 && tradeId <= tradePairCounter, unicode"无效的交易 ID！");
         TradePair storage trade = tradePairs[tradeId];
-        require(!trade.isCompleted, unicode"交易已完成！");
-        require(!trade.isDisputed, unicode"交易存在争议！");
+        require(block.timestamp <= trade.createTime + 18000, "Trade expired");
+        require(trade.state == 2, "Invalid state: waiting for confirmations or disputed");
+
 
         // 标记为已完成
-        trade.isCompleted = true;
+        trade.state = 3;
+
+
+        // 自动发放奖励
+        _distributeReward(trade.partyA, trade.exthReward);
+        _distributeReward(trade.partyB, trade.exthReward);
+
+        // 自动收取手续费（根据 trade 中存储的 feeAmount）
+        _collectFee(tradeId, trade.feeAmount);
+
+        // 更新总交易量
+        totalUTVolume += trade.amount;
+        if (users[trade.partyA].newUserTradeCount > 0) {
+            users[trade.partyA].newUserTradeCount -= 1;
+        }
+
+        trade.completeTime = block.timestamp;
+
+        //交易完成后，检查并更新双方用户类型
+        updateUserType(trade.partyA);
+        updateUserType(trade.partyB);
+
         emit TradeCompleted(tradeId);
-        // 移除：不再减少 newUserTradeCount，这个逻辑移到链下处理
         return true;
     }
 
     /**
-     * @notice 收取手续费（由后端调用，在交易完成后）
-     * @dev 用户需要先通过 EXTH 合约的 approve 函数授权给本合约
+     * @notice 收取手续费
      * @param tradeId 交易 ID
      * @param feeAmount 手续费金额（EXTH）
      */
-    function collectFee(uint256 tradeId, uint256 feeAmount) external nonReentrant {
-        require(tradeId > 0 && tradeId <= tradePairCounter, unicode"无效的交易 ID！");
+    function _collectFee(uint256 tradeId, uint256 feeAmount) internal nonReentrant {
         TradePair storage trade = tradePairs[tradeId];
-        require(trade.isCompleted, unicode"交易未完成！");
-        require(feeAmount > 0, unicode"手续费必须大于 0！");
 
         // 从 partyA（率先转账方）收取手续费
         address feePayerA = trade.partyA;
         // 从 partyB（履约方）收取手续费
         address feePayerB = trade.partyB;
 
-        // 检查授权额度是否足够
-        require(exthToken.allowance(feePayerA, address(this)) >= feeAmount, unicode"授权额度不足！");
-        require(exthToken.allowance(feePayerB, address(this)) >= feeAmount, unicode"授权额度不足！");
+            // 检查授权额度是否足够
+            require(exthToken.allowance(feePayerA, address(this)) >= feeAmount, unicode"授权额度不足！");
+            require(exthToken.allowance(feePayerB, address(this)) >= feeAmount, unicode"授权额度不足！");
 
-        // 从 feePayer 账户扣取手续费到合约
-        require(exthToken.transferFrom(feePayerA, address(this), feeAmount), unicode"EXTH 转账失败！");
-        require(exthToken.transferFrom(feePayerB, address(this), feeAmount), unicode"EXTH 转账失败！");
+            // 从用户账户扣取手续费到金库合约
+            require(exthToken.transferFrom(feePayerA, address(treasure), feeAmount), unicode"EXTH 转账失败！");
+            require(exthToken.transferFrom(feePayerB, address(treasure), feeAmount), unicode"EXTH 转账失败！");
 
         emit FeeCollected(tradeId, feePayerA, feePayerB, feeAmount);
     }
@@ -254,13 +365,21 @@ contract Exchange is Ownable, ReentrancyGuard {
 
     /**
      * @notice 发放 EXTH 奖励（内部函数）
-     * @dev 实际奖励发放由后端处理，本合约有 EXTH 代币授权
+     * @dev 从金库合约提取 EXTH 代币发放给用户
      * @param user 接收奖励的用户地址
      * @param reward 奖励金额
      */
     function _distributeReward(address user, uint256 reward) internal {
-        // 注：实际奖励发放由后端处理，合约有EXTH代币授权
-        require(exthToken.transfer(user, reward), unicode"奖励发放失败！");
+        require(address(treasure) != address(0), "Treasure not set");
+        treasure.withdrawERC20(address(exthToken), user, reward);
+    }
+
+    /**
+     * @notice 获取当前区块时间的年份
+     */
+    function _getCurrentYear() internal view returns (uint256) {
+        // 从 1970-01-01 开始的秒数转换为年
+        return (block.timestamp / 31536000) + 1970;
     }
 
     /**
@@ -268,6 +387,19 @@ contract Exchange is Ownable, ReentrancyGuard {
      * @dev 每年每多发生 1 亿个 UT 后奖励就减半
      */
     function _checkRewardHalving() internal {
+        uint256 currentYear = _getCurrentYear();
+        // 如果跨年了，重置交易量计数器
+        if (currentYear > lastRewardYear) {
+            // 如果需要保留历史总量用于其他用途，可以移到另一个变量 totalAllTimeVolume
+            totalUTVolume = 0;
+            lastRewardYear = currentYear;
+
+            // 跨年时，奖励恢复初始值
+            currentReward = INITIAL_REWARD;
+            emit RewardUpdated(currentReward, 0);
+        }
+
+        //检查当年交易量是否达到减半阈值（1亿）
         uint256 halvingCount = totalUTVolume / REWARD_HALVING_INTERVAL;
         uint256 expectedReward = INITIAL_REWARD;
 
@@ -280,6 +412,11 @@ contract Exchange is Ownable, ReentrancyGuard {
             emit RewardUpdated(currentReward, totalUTVolume);
         }
     }
+    // 设置金库合约地址（仅 Owner）
+    function setTreasure(address _treasure) external onlyOwner {
+        require(_treasure != address(0), "Invalid address");
+        treasure = Treasure(payable(_treasure));
+    }
 
     // ==================== 争议处理函数 ====================
 
@@ -291,12 +428,11 @@ contract Exchange is Ownable, ReentrancyGuard {
      */
     function disputeTrade(uint256 tradeId, address disputedParty) external  {
         TradePair storage trade = tradePairs[tradeId];
-        require(!trade.isCompleted, unicode"已完成的交易无法发起争议！");
-        require(!trade.isDisputed, unicode"争议已解决！");
         require(disputedParty == trade.partyA || disputedParty == trade.partyB, unicode"无效的被争议方！");
+        require(trade.state < 3, "Trade already finished");
+        require(trade.state != 5, "Already disputed");
 
-        trade.isDisputed = true;
-        trade.disputedParty = disputedParty;
+        trade.state = 5;
 
         emit TradeDisputed(tradeId, disputedParty);
 
@@ -325,6 +461,14 @@ contract Exchange is Ownable, ReentrancyGuard {
      */
     function setAuthorizedCaller(address _caller, bool _authorized) external onlyOwner {
         authorizedCallers[_caller] = _authorized;
+    }
+
+    // 只有白名单地址能调用
+    function markTradeAsResolved(uint256 tradeId) external onlyAuthorized {
+        require(tradePairs[tradeId].state == 5, "Not in dispute");
+        tradePairs[tradeId].state = 6; // 标记为已解决
+        tradePairs[tradeId].completeTime = block.timestamp;
+        emit TradeResolved(tradeId);
     }
 
 
@@ -374,25 +518,17 @@ contract Exchange is Ownable, ReentrancyGuard {
     }
 
 
-    /**
-     * @notice 获取交易信息
-     * @param tradeId 交易 ID
-     * @return partyA 率先转账方
-     * @return partyB 履约方
-     * @return amount 交易金额（UT）
-     * @return exthReward EXTH 奖励数量
-     * @return isCompleted 是否已完成
-     * @return isDisputed 是否存在争议
-     * @return disputedParty 被争议方地址
-     */
+
     function getTradeInfo(uint256 tradeId) external view returns (
         address partyA,
         address partyB,
         uint256 amount,
         uint256 exthReward,
-        bool isCompleted,
-        bool isDisputed,
-        address disputedParty
+        uint256 feeAmount,
+        uint8 state,
+        address disputedParty,
+        uint256 completeTime,
+        uint256 createTime
     ) {
         TradePair memory trade = tradePairs[tradeId];
         return (
@@ -400,9 +536,11 @@ contract Exchange is Ownable, ReentrancyGuard {
         trade.partyB,
         trade.amount,
         trade.exthReward,
-        trade.isCompleted,
-        trade.isDisputed,
-        trade.disputedParty
+        trade.feeAmount,
+        trade.state,
+        trade.disputedParty,
+        trade.completeTime,
+        trade.createTime
         );
     }
 }

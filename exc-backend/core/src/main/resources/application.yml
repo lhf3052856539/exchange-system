@@ -50,6 +50,11 @@ web3j:
   ens:
     enabled: false  # 禁用ENS解析
 
+# JWT 配置
+jwt:
+  secret: mySecretKeyForJwtTokenGenerationAndValidation123456
+  expiration: 604800000  # 7 天（毫秒）
+
 # 合约地址配置
 contract:
   exchange:

@@ -17,8 +17,6 @@ import org.springframework.stereotype.Service;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Objects;
-import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -44,19 +42,11 @@ public class NotificationServiceImpl implements NotificationService {
     public void sendNotification(NotificationDTO notification) {
         log.info("Sending notification to {}: {}", notification.getAddress(), notification.getTitle());
 
-        // ✅ 1. 先存储到数据库（无论在线与否）
+        // 1. 存数据库（唯一数据源）
         saveToDatabase(notification);
 
-        // 2. 检查用户在线状态
-        boolean isOnline = checkUserOnline(notification.getAddress());
-
-        if (isOnline) {
-            // 3.1 在线：直接 WebSocket 推送
-            pushViaWebSocket(notification);
-        } else {
-            // 3.2 离线：存储到 Redis
-            saveToRedis(notification);
-        }
+        // 2. 尝试 WebSocket 推送
+        pushViaWebSocket(notification);
     }
 
     /**
@@ -74,20 +64,6 @@ public class NotificationServiceImpl implements NotificationService {
     }
 
     /**
-     * 检查用户在线状态
-     */
-    private boolean checkUserOnline(String address) {
-        try {
-            String onlineKey = "user:online:" + address;
-            String online = redisTemplate.opsForValue().get(onlineKey);
-            return "true".equals(online);
-        } catch (Exception e) {
-            log.warn("Failed to check online status for {}: {}", address, e.getMessage());
-            return false;
-        }
-    }
-
-    /**
      * WebSocket 实时推送
      */
     private void pushViaWebSocket(NotificationDTO notification) {
@@ -98,56 +74,118 @@ public class NotificationServiceImpl implements NotificationService {
         } catch (Exception e) {
             log.error("❌ Failed to send notification via WebSocket: {}", e.getMessage());
             // 推送失败则降级存储到 Redis
-            saveToRedis(notification);
         }
     }
 
+    @Override
+    public void sendUserUpgradeNotification(String address, int newType) {
+        String title = "身份变更通知";
+        String content = "";
 
-
-    /**
-     * 存储离线消息到 Redis
-     */
-    private void saveToRedis(NotificationDTO notification) {
-        try {
-            String key = "notification:offline:" + notification.getAddress();
-            String json = objectMapper.writeValueAsString(notification);
-
-            redisTemplate.opsForList().leftPush(key, json);
-            redisTemplate.opsForList().trim(key, 0, 49);  // 最多保留 50 条
-
-            // ✅ 设置 7 天过期时间
-            redisTemplate.expire(key, 7, TimeUnit.DAYS);
-
-            log.debug("Notification saved to Redis for offline user {}", notification.getAddress());
-        } catch (Exception e) {
-            log.warn("Failed to save notification to Redis: {}", e.getMessage());
+        if (newType == 0) {
+            content = "欢迎加入！您有 3 次率先转账任务，完成后即可升级。";
+        } else if (newType == 1) {
+            content = "恭喜！您已升级为普通用户，解锁全部交易功能。";
+        } else if (newType == 2) {
+            content = "尊贵身份！您的 EXTH 余额已达标，正式升级为种子用户。";
         }
+
+        // 复用内部已有的发送逻辑（WebSocket + DB）
+        NotificationDTO notification = new NotificationDTO();
+        notification.setAddress(address);
+        notification.setTitle(title);
+        notification.setContent(content);
+        notification.setType(2); // 系统通知类型
+        notification.setIsRead(false);
+        notification.setCreateTime(LocalDateTime.now());
+
+        this.sendNotification(notification);
     }
 
-    private void pushViaStomp(NotificationDTO notification) {
-        try {
-            // 直接发送到 /topic/notifications，包含 address 字段让前端过滤
-            messagingTemplate.convertAndSend(
-                    "/topic/notifications/" + notification.getAddress(),
-                    notification
-            );
-            log.info("✅ Notification sent to /topic/notifications/{}", notification.getAddress());
-        } catch (Exception e) {
-            log.error("❌ Failed to send notification via STOMP: {}", e.getMessage(), e);
-        }
-    }
 
     @Override
     public void sendTradeNotification(String address, String tradeId, String type) {
         NotificationDTO notification = new NotificationDTO();
         notification.setAddress(address);
         notification.setTitle("交易通知");
-        notification.setContent("交易 " + tradeId + " 状态更新：" + type);
+
+        String content = switch (type) {
+            case "matched" -> "您的交易 " + tradeId + " 已匹配成功，请尽快确认";
+            case "created" -> "您的交易 " + tradeId + " 已成功创建并上链，等待对方确认";
+            case "party_a_confirmed" -> "甲方已确认交易 " + tradeId + "，请您进行确认";
+            case "party_b_confirmed" -> "乙方已确认交易 " + tradeId + "，请您进行最终确认";
+            case "pending_chain_confirm" -> "交易 " + tradeId + " 正在等待链上确认";
+            case "completed" -> "交易 " + tradeId + " 已完成";
+            case "disputed" -> "交易 " + tradeId + " 已被提起争议";
+            case "expired" -> "交易 " + tradeId + " 已超时取消";
+            default -> "交易 " + tradeId + " 状态更新：" + type;
+        };
+
+        notification.setContent(content);
         notification.setType(1);
         notification.setIsRead(false);
         notification.setCreateTime(LocalDateTime.now());
         sendNotification(notification);
     }
+
+    @Override
+    public void sendDaoProposalNotification(String address, String proposalId, String title, String action) {
+        NotificationDTO notification = new NotificationDTO();
+        notification.setAddress(address);
+        notification.setTitle("🗳️ DAO 提案通知");
+
+        String content = switch (action) {
+            case "created" -> "新提案已创建：" + title;
+            case "voted" -> "您已成功投票，提案：" + title;
+            case "queued" -> "提案 " + title + " 已进入公示期";
+            case "executed" -> "提案 " + title + " 已执行成功";
+            case "cancelled" -> "提案 " + title + " 已取消";
+            case "defeated" -> "提案 " + title + " 未通过";
+            default -> "提案 " + title + " 状态更新：" + action;
+        };
+
+        notification.setContent(content);
+        notification.setType(4);
+        notification.setIsRead(false);
+        notification.setCreateTime(LocalDateTime.now());
+        sendNotification(notification);
+    }
+
+    @Override
+    public void sendArbitrationNotification(String address, String tradeId, String role, String action) {
+        NotificationDTO notification = new NotificationDTO();
+        notification.setAddress(address);
+        notification.setTitle("⚖️ 仲裁通知");
+
+        String content = switch (action) {
+            case "initiated" -> "交易 " + tradeId + " 已被提起仲裁";
+            case "proposal_created" -> "交易 " + tradeId + " 的仲裁提案已创建";
+            case "voted" -> "您已成功对交易 " + tradeId + " 的仲裁进行投票";
+            case "executed" -> "交易 " + tradeId + " 的仲裁已执行";
+            default -> "交易 " + tradeId + " 仲裁状态更新：" + action;
+        };
+
+        notification.setContent(content);
+        notification.setType(2);
+        notification.setIsRead(false);
+        notification.setCreateTime(LocalDateTime.now());
+        sendNotification(notification);
+    }
+
+    @Override
+    public void sendSystemNotification(String address, String title, String content) {
+        NotificationEntity notification = new NotificationEntity();
+        notification.setAddress(address);
+        notification.setTitle(title);
+        notification.setContent(content);
+        notification.setType(2); // 2-系统通知
+        notification.setIsRead(false);
+        notification.setCreateTime(LocalDateTime.now());
+        notificationMapper.insert(notification);
+
+        log.info("System notification sent to {}: {}", address, title);
+    }
+
 
     @Override
     public List<NotificationDTO> getUserNotifications(String address, Boolean unreadOnly) {
@@ -196,39 +234,6 @@ public class NotificationServiceImpl implements NotificationService {
         } catch (Exception e) {
             log.error("Failed to delete notification: {}", e.getMessage());
         }
-    }
-
-
-    @Override
-    public List<NotificationDTO> getOfflineMessages(String address) {
-        try {
-            String key = "notification:offline:" + address;
-            List<String> messages = redisTemplate.opsForList().range(key, 0, -1);
-
-            if (messages == null || messages.isEmpty()) {
-                return new ArrayList<>();
-            }
-
-            return messages.stream()
-                    .map(json -> {
-                        try {
-                            return objectMapper.readValue(json, NotificationDTO.class);
-                        } catch (Exception e) {
-                            return null;
-                        }
-                    })
-                    .filter(Objects::nonNull)
-                    .collect(Collectors.toList());
-        } catch (Exception e) {
-            return new ArrayList<>();
-        }
-    }
-
-    @Override
-    public void clearOfflineMessages(String address) {
-        String key = "notification:offline:" + address;
-        redisTemplate.delete(key);
-        log.info("Cleared offline messages for user {}", address);
     }
 
     /**

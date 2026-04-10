@@ -58,69 +58,40 @@ public class SystemConstants {
     }
 
 
+    /**
+     * 交易状态 (需与合约 state 字段逻辑对齐)
+     */
     public static class TradeStatus {
-        public static final int WAITING_MATCH = 0;      //等待匹配
-        public static final int MATCHED = 1;            //匹配成功
-        public static final int CONFIRMING_A = 2;       //等待甲方确认（提交哈希）
-        public static final int PARTY_A_CONFIRMED = 3;  //甲方已确认（等待乙方确认）
-        public static final int CONFIRMING_B = 4;       //等待乙方确认（提交哈希）
-        public static final int PARTY_B_CONFIRMED = 5;  //乙方已确认（等待甲方最终确认）
-        public static final int PENDING_CHAIN_CONFIRM = 6;  //待链上确认（已提交链上交易）
-        public static final int COMPLETED = 7;          //交易成功
-        public static final int DISPUTED = 8;           //交易存在争议
-        public static final int EXPIRED = 9;            //交易超时
-        public static final int CANCELLED = 10;         //交易取消
+        public static final int WAITING_MATCH = 0;      // 等待匹配
+        public static final int MATCHED = 1;            // 匹配成功 (链上 Created)
+        public static final int PARTY_A_CONFIRMED = 2;  // 甲方已确认 (链上 State 1)
+        public static final int PARTY_B_CONFIRMED = 3;  // 乙方已确认 (链上 State 2)
+        public static final int COMPLETED = 4;          // 交易成功 (链上 State 3)
+        public static final int DISPUTED = 5;           // 争议中 (链上 State 5)
+        public static final int RESOLVED = 6;           // 争议已解决 (链上 State 6)
+        public static final int CANCELLED = 7;          // 交易取消(链上 State 4)
+        public static final int EXPIRED = 8;          // 交易超时 (链上 State 7)
+        public static final int PENDING_CHAIN_COMPLETE = 9;          // 等待链上确认
+
     }
+    /**
+     * 争议处理状态
+     */
     public static class DisputeStatus {
-        public static final int PENDING = 0;        //待处理
-        public static final int RESOLVED = 1;       // 争议已解决
-        public static final int REJECTED = 2;       //拒绝
-        public static final int BLACKLISTED = 3;    //加入黑名单
+        public static final int PENDING_CHAIN_COMPLETE = 0;       // 等待链上确认
+        public static final int PENDING = 1;        // 处理中
+        public static final int RESOLVED = 2;       // 已解决
+        public static final int REJECTED = 3;       // 已驳回
+
     }
 
     public static class RedisKey {
         /**
-         * 用户信息
-         */
-        public static final String USER_INFO = "user:info:";
-        /**
          * 用户余额
          */
         public static final String USER_BALANCE = "user:balance:";
-        /**
-         * 交易队列
-         */
-        public static final String TRADE_QUEUE = "trade:queue";
-        /**
-         * 交易信息
-         */
-        public static final String TRADE_INFO = "trade:info:";
-        /**
-         * 交易匹配信息
-         */
-        public static final String TRADE_MATCH = "trade:match:";
-        /**
-         * 等待匹配队列
-         */
-        public static final String WAITING_MATCH = "waiting:match:";
-        /**
-         * 待确认队列
-         */
-        public static final String RATE_CACHE = "rate:cache";
-        /**
-         * 随机数缓存
-         */
-        public static final String NONCE = "nonce:";
-        /**
-         * 空投状态
-         */
-        public static final String USER_AIRDROP_STATUS = "user:airdrop:status:";
-        /**
-         * 空投数量
-         */
-        public static final String USER_TOTAL_AIRDROP = "user:airdrop:total:";
-
-    }
+        /** 分布式锁前缀 */
+        public static final String LOCK_PREFIX = "lock:";    }
 
     public static class MQQueue {
         /**
@@ -128,38 +99,8 @@ public class SystemConstants {
          */
         public static final String TRADE_MATCH = "queue.trade.match";
         /**
-         * 交易确认队列
-         */
-        public static final String TRADE_CONFIRM = "queue.trade.confirm";
-        /**
-         * 争议处理队列
-         */
-        public static final String TRADE_DISPUTE = "queue.trade.dispute";
-        /**
          * 区块链事件队列
          */
         public static final String BLOCKCHAIN_EVENT = "queue.blockchain.event";
-        /**
-         * 通知队列
-         */
-        public static final String NOTIFICATION = "queue.notification";
-        /**
-         * 空投事件队列
-         */
-        public static final String AIRDROP_EVENT = "queue.airdrop.event";
-        /**
-         * 用户事件队列
-         */
-        public static final String USER_EVENT = "queue.user.event";
-    }
-
-    public static class RewardConstants {
-        /**
-         * 默认空投奖励金额
-         */
-        public static final long DEFAULT_REWARD_AMOUNT = 100;
-        public static final long MIN_REWARD_AMOUNT = 10;
-        public static final long MAX_REWARD_AMOUNT = 1000;
-        public static final double AIRDROP_REWARD_PERCENT = 0.001;
-    }
+            }
 }

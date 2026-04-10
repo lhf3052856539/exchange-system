@@ -62,7 +62,7 @@ contract Treasure is Ownable {
      * @param _to 接收代币的地址。
      * @param _amount 提取的代币数量。
      */
-    function withdrawERC20(address _tokenAddress, address _to, uint256 _amount) external onlyOwner {
+    function withdrawERC20(address _tokenAddress, address _to, uint256 _amount) external onlyAuthorized {
         require(_to != address(0), "Treasure: Invalid recipient address");
         IERC20 token = IERC20(_tokenAddress);
         require(token.balanceOf(address(this)) >= _amount, "Treasure: Insufficient token balance");

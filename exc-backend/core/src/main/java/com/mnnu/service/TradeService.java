@@ -4,6 +4,7 @@ package com.mnnu.service;
  */
 
 import com.mnnu.dto.*;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 
@@ -34,6 +35,9 @@ public interface TradeService {
      */
     TradeDTO finalConfirmPartyA(String address, String tradeId);
 
+    @Transactional(rollbackFor = Exception.class)
+    TradeDTO cancelTrade(String address, String tradeId);
+
     /**
      * 发起争议
      */
@@ -59,9 +63,5 @@ public interface TradeService {
      */
     void checkExpiredTrades();
 
-    /**
-     * 更新交易状态
-     */
-    void updateStatus(String tradeId, Integer status);
 
 }

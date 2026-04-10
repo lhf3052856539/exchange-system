@@ -11,6 +11,8 @@ import org.web3j.protocol.core.DefaultBlockParameterName;
 import org.web3j.protocol.core.methods.response.TransactionReceipt;
 import org.web3j.tx.TransactionManager;
 import org.web3j.tx.gas.ContractGasProvider;
+import org.web3j.utils.Numeric;
+
 import javax.annotation.PostConstruct;
 import java.math.BigInteger;
 import java.util.List;

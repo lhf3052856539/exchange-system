@@ -1,10 +1,13 @@
 package com.mnnu.wrapper;
 
+import io.reactivex.Flowable;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
+import org.web3j.model.MultiSigWallet;
 import org.web3j.model.Treasure;
 import org.web3j.protocol.Web3j;
+import org.web3j.protocol.core.DefaultBlockParameterName;
 import org.web3j.protocol.core.methods.response.TransactionReceipt;
 import org.web3j.tx.TransactionManager;
 import org.web3j.tx.gas.ContractGasProvider;
@@ -91,6 +94,11 @@ public class TreasureWrapper extends BaseWrapper{
             log.error("Failed to withdraw ERC20 compensation: {}", e.getMessage());
             throw e;
         }
+    }
+
+    // 赔偿支付事件订阅流
+    public Flowable<Treasure.CompensationPaidEventResponse> compensationPaidEventFlowable(DefaultBlockParameterName startBlock, DefaultBlockParameterName endBlock) {
+        return contract.compensationPaidEventFlowable(startBlock, endBlock);
     }
 
     /**

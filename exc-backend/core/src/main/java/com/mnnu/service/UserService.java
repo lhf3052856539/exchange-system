@@ -45,10 +45,6 @@ public interface UserService {
      */
     boolean isBlacklisted(String address);
 
-    /**
-     * 拉黑用户
-     */
-    void blacklistUser(String address, String reason);
 
 
     UserTradeStatsDTO getUserTradeStats(String address);

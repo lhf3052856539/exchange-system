@@ -13,14 +13,11 @@ import com.mnnu.entity.DisputeRecordEntity;
 import com.mnnu.entity.TradeRecordEntity;
 import com.mnnu.entity.UserEntity;
 import com.mnnu.mapper.DisputeRecordMapper;
-import com.mnnu.mapper.TradeRecordMapper;
+import com.mnnu.mapper.TradeMapper;
 import com.mnnu.mapper.UserMapper;
 import com.mnnu.service.*;
-import com.mnnu.utils.AmountUtil;
-import com.mnnu.utils.Web3jUtil;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.redisson.api.RBucket;
 import org.redisson.api.RLock;
 import org.redisson.api.RedissonClient;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
@@ -29,7 +26,6 @@ import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import java.math.BigDecimal;
-import java.math.BigInteger;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.UUID;
@@ -41,12 +37,11 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class TradeServiceImpl implements TradeService {
 
-    private final TradeRecordMapper tradeMapper;
+    private final TradeMapper tradeMapper;
     private final DisputeRecordMapper disputeMapper;
     private final UserMapper userMapper;
     private final UserService userService;
     private final RateService rateService;
-    private final RewardService rewardService;
     private final MatchingEngineService matchingEngine;
     private final NotificationServiceImpl notificationService;
     @Autowired
@@ -93,8 +88,6 @@ public class TradeServiceImpl implements TradeService {
         matchingEngine.addToWaitingQueue(address, param.getAmount(),
                 param.getFromCurrency(), param.getToCurrency());
 
-        // 触发匹配
-        rabbitTemplate.convertAndSend(SystemConstants.MQQueue.TRADE_MATCH, "match");
 
         // 获取队列位置和统计信息
         WaitingQueueStatsDTO stats = matchingEngine.getWaitingQueueStats();
@@ -150,11 +143,6 @@ public class TradeServiceImpl implements TradeService {
         BigDecimal amountA = usdValue.multiply(rate);  // A 转出 fromCurrency
         BigDecimal amountB = usdValue;                  // B 转出 toCurrency（等值 USD）
 
-        // 检查奖励是否需要减半
-        Long totalVolume = rewardService.getTotalUTVolume();
-        if (rewardService.checkHalvingNeeded(totalVolume)) {
-            log.info("Reward halving triggered at volume: {}", totalVolume);
-        }
 
         // 创建交易记录
         TradeRecordEntity trade = new TradeRecordEntity();
@@ -167,36 +155,13 @@ public class TradeServiceImpl implements TradeService {
         trade.setFromCurrency(match.getFromCurrency());
         trade.setToCurrency(match.getToCurrency());
         trade.setExchangeRate(rate);
-        trade.setExthReward(rewardService.getCurrentReward());
-        trade.setStatus(SystemConstants.TradeStatus.MATCHED);
-        trade.setMatchTime(LocalDateTime.now());
-        trade.setExpireTime(LocalDateTime.now().plusHours(SystemConstants.TradeConstants.TRADE_TIMEOUT_HOURS));
         trade.setPartyAType(getUserType(match.getPartyA()));
         trade.setPartyBType(getUserType(match.getPartyB()));
-        trade.setIsPartyAConfirmed(false);
-        trade.setIsPartyBConfirmed(false);
-        trade.setIsDisputed(false);
+        trade.setStatus(SystemConstants.TradeStatus.PENDING_CHAIN_COMPLETE);
 
         tradeMapper.insert(trade);
 
-        log.info("📝 Trade inserted into database with id={}", trade.getId());
-
-        // ❌ 移除：不再在匹配成功后立即调用链上合约
-        // ✅ 改为：等到甲方最终确认时再调用链上合约创建交易对
-
-        // 更新用户类型
-        userService.updateUserType(match.getPartyA());
-        userService.updateUserType(match.getPartyB());
-
-        // 发送通知
-        notificationService.sendTradeNotification(match.getPartyA(), tradeId, "matched");
-        notificationService.sendTradeNotification(match.getPartyB(), tradeId, "matched");
-
-        // 缓存交易信息
-        cacheTradeInfo(trade);
-
-        log.info("Trade pair created: {} - {} vs {}, amount: {} UT",
-                tradeId, match.getPartyA(), match.getPartyB(), match.getAmount());
+        log.info("Trade inserted into database with id={}", trade.getId());
 
         return convertToDTO(trade);
     }
@@ -204,7 +169,6 @@ public class TradeServiceImpl implements TradeService {
 
     /**
      * A 确认交易
-     * 流程：验证 txHash → 更新数据库状态 → 等待链上事件同步
      */
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -229,6 +193,11 @@ public class TradeServiceImpl implements TradeService {
             if (trade.getStatus() != SystemConstants.TradeStatus.MATCHED) {
                 throw new BusinessException("Trade status is not matched");
             }
+            if (LocalDateTime.now().isAfter(trade.getExpireTime())) {
+                trade.setStatus(SystemConstants.TradeStatus.DISPUTED);
+                tradeMapper.updateById(trade);
+                throw new BusinessException("Trade expired");
+            }
 
             // 验证甲方的转账（链上验证）
             String exthContractAddress = blockchainService.getExthContractAddress();
@@ -238,18 +207,10 @@ public class TradeServiceImpl implements TradeService {
                 throw new BusinessException("Transaction verification failed");
             }
 
-            // 甲方确认后，状态变为 PARTY_A_CONFIRMED（等待乙方确认）
-            // 注意：这里只更新数据库，不调用链上合约
-            trade.setIsPartyAConfirmed(true);
-            trade.setPartyAConfirmTime(LocalDateTime.now());
-            trade.setStatus(SystemConstants.TradeStatus.PARTY_A_CONFIRMED);
             trade.setTxHashA(txHash);
+            trade.setStatus(SystemConstants.TradeStatus.PENDING_CHAIN_COMPLETE);
             tradeMapper.updateById(trade);
 
-            // 发送通知
-            notificationService.sendTradeNotification(trade.getPartyB(), tradeId, "party_a_confirmed");
-
-            log.info("Party A confirmed: {}, trade: {}", address, tradeId);
 
             return convertToDTO(trade);
 
@@ -284,22 +245,14 @@ public class TradeServiceImpl implements TradeService {
                 throw new BusinessException("Only party B can confirm");
             }
 
-            // ✅ 修改：允许乙方在 PARTY_A_CONFIRMED 或 PARTY_B_CONFIRMED 状态下确认
-            if (trade.getStatus() != SystemConstants.TradeStatus.PARTY_A_CONFIRMED
-                    && trade.getStatus() != SystemConstants.TradeStatus.PARTY_B_CONFIRMED) {
+            if (trade.getStatus() != SystemConstants.TradeStatus.PARTY_A_CONFIRMED) {
                 throw new BusinessException("Party A has not confirmed yet");
             }
 
             if (LocalDateTime.now().isAfter(trade.getExpireTime())) {
-                trade.setStatus(SystemConstants.TradeStatus.EXPIRED);
+                trade.setStatus(SystemConstants.TradeStatus.DISPUTED);
                 tradeMapper.updateById(trade);
                 throw new BusinessException("Trade expired");
-            }
-
-            // 如果乙方已经确认过了，直接返回
-            if (Boolean.TRUE.equals(trade.getIsPartyBConfirmed())) {
-                log.info("Party B already confirmed: {}, trade: {}", address, tradeId);
-                return convertToDTO(trade);
             }
 
             // 验证乙方的转账（链上验证）
@@ -310,27 +263,10 @@ public class TradeServiceImpl implements TradeService {
                 throw new BusinessException("Transaction verification failed");
             }
 
-            // 乙方确认了，但不直接完成交易，而是等待甲方最终确认
-            // 注意：这里只更新数据库，不调用链上合约
-            trade.setIsPartyBConfirmed(true);
-            trade.setPartyBConfirmTime(LocalDateTime.now());
             trade.setTxHashB(txHash);
+            trade.setStatus(SystemConstants.TradeStatus.PENDING_CHAIN_COMPLETE);
 
-            // ✅ 关键修复：确保状态设置为 PARTY_B_CONFIRMED
-            trade.setStatus(SystemConstants.TradeStatus.PARTY_B_CONFIRMED);
-
-            int updated = tradeMapper.updateById(trade);
-            log.info("✅ Party B confirmation updated: rows={}, trade={}, isPartyBConfirmed={}",
-                    updated, tradeId, trade.getIsPartyBConfirmed());
-
-            // 清除缓存
-            String cacheKey = SystemConstants.RedisKey.TRADE_INFO + tradeId;
-            redissonClient.getBucket(cacheKey).delete();
-
-            // 发送通知给甲方，让其进行最终确认
-            notificationService.sendTradeNotification(trade.getPartyA(), tradeId, "party_b_confirmed");
-
-            log.info("Party B confirmed: {}, trade: {}", address, tradeId);
+            tradeMapper.updateById(trade);
 
             return convertToDTO(trade);
 
@@ -354,6 +290,53 @@ public class TradeServiceImpl implements TradeService {
     public TradeDTO finalConfirmPartyA(String address, String tradeId) {
         RLock lock = redissonClient.getLock("trade:lock:" + tradeId);
         try {
+            lock.lock();
+
+            TradeRecordEntity trade = tradeMapper.selectByTradeId(tradeId);
+            if (trade == null) {
+                throw new BusinessException("Trade not found");
+            }
+
+            //校验权限和状态
+            if (!trade.getPartyA().equals(address)) {
+                throw new BusinessException("Only Party A can finalize the trade");
+            }
+
+            // 此时状态应该是 2 (PartyB Confirmed)，允许发起最终确认
+            if (trade.getStatus() != SystemConstants.TradeStatus.PARTY_B_CONFIRMED) {
+                throw new BusinessException("Trade is not ready to be completed. Current status: " + trade.getStatus());
+            }
+            if (LocalDateTime.now().isAfter(trade.getExpireTime())) {
+                trade.setStatus(SystemConstants.TradeStatus.DISPUTED);
+                tradeMapper.updateById(trade);
+                throw new BusinessException("Trade expired");
+            }
+
+            // 更新本地记录（标记已提交，具体状态由 Complete 事件监听器更新）
+            trade.setStatus(SystemConstants.TradeStatus.PENDING_CHAIN_COMPLETE);
+            tradeMapper.updateById(trade);
+
+            return convertToDTO(trade);
+
+        } catch (Exception e) {
+            log.error("Failed to finalize trade", e);
+            throw new BusinessException("Finalize failed: " + e.getMessage());
+        } finally {
+            if (lock.isHeldByCurrentThread()) {
+                lock.unlock();
+            }
+        }
+    }
+
+    /**
+     * 取消交易
+     * 流程：更新链下状态 → 调用链上合约取消 → 监听器同步最终状态
+     */
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public TradeDTO cancelTrade(String address, String tradeId) {
+        RLock lock = redissonClient.getLock("trade:lock:" + tradeId);
+        try {
             if (!lock.tryLock(10, 30, TimeUnit.SECONDS)) {
                 throw new BusinessException("System busy, try again");
             }
@@ -363,165 +346,35 @@ public class TradeServiceImpl implements TradeService {
                 throw new BusinessException("Trade not found");
             }
 
-            // 验证当前用户是否为甲方
-            if (!trade.getPartyA().equals(address)) {
-                throw new BusinessException("Only party A can final confirm");
+            // 验证权限：只有交易参与方可以取消
+            if (!trade.getPartyA().equals(address) && !trade.getPartyB().equals(address)) {
+                throw new BusinessException("Not a party to this trade");
             }
 
-            // 检查状态 - 必须是乙方已确认状态
-            if (trade.getStatus() != SystemConstants.TradeStatus.PARTY_B_CONFIRMED) {
-                throw new BusinessException("Party B has not confirmed yet");
+            // 验证状态：只有特定状态可以取消
+            if (trade.getStatus() == SystemConstants.TradeStatus.COMPLETED) {
+                throw new BusinessException("Cannot cancel completed trade");
             }
-
-            // ✅ 改进 1：在链上创建交易对并获取 chainTradeId
-            BigInteger chainTradeId = null;
-            try {
-                log.info("🔗 Creating trade pair on chain for: {} vs {}, amount: {}",
-                        trade.getPartyA(), trade.getPartyB(), trade.getAmount());
-
-                String chainTradeIdStr = blockchainService.createTradePairOnChain(
-                        trade.getPartyA(),
-                        trade.getPartyB(),
-                        trade.getAmount()
-                );
-
-                log.info("✅ Trade pair created on chain: chainTradeIdStr={}", chainTradeIdStr);
-
-                // 解析 chainTradeId
-                if (chainTradeIdStr != null && !chainTradeIdStr.startsWith("0x") && chainTradeIdStr.matches("\\d+")) {
-                    chainTradeId = new BigInteger(chainTradeIdStr);
-
-                    // 保存到数据库
-                    trade.setChainTradeId(chainTradeId.longValue());
-                    log.info("✅ Saved chainTradeId to database: {}", chainTradeId);
-                } else {
-                    log.warn("⚠️ Invalid chainTradeId format: {}", chainTradeIdStr);
-                }
-
-            } catch (Exception e) {
-                log.error("❌ Failed to create trade pair on chain: {}", e.getMessage(), e);
-                throw new BusinessException("Failed to create trade pair on chain: " + e.getMessage());
+            if (trade.getStatus() == SystemConstants.TradeStatus.CANCELLED) {
+                throw new BusinessException("Trade already cancelled");
             }
-
-            // ✅ 改进 2：使用 chainTradeId 调用链上合约完成交易
-            if (chainTradeId == null) {
-                throw new BusinessException("Failed to get chainTradeId");
+            if (trade.getStatus() == SystemConstants.TradeStatus.DISPUTED) {
+                throw new BusinessException("Cannot cancel disputed trade");
             }
-
-            String txHash = blockchainService.completeTrade(chainTradeId);
-            log.info("✅ Trade completed on chain: txHash={}", txHash);
-
-            // ✅ 改进 3：设置待确认状态，等待事件同步
-            trade.setStatus(SystemConstants.TradeStatus.PENDING_CHAIN_CONFIRM);
-            trade.setChainTxHash(txHash);
-            trade.setCompleteTime(LocalDateTime.now());
-
-            // ✅ 新增：减少甲方的新用户剩余次数（如果甲方是 NEW 用户且有剩余次数）
-            UserEntity partyA = userMapper.selectByAddress(trade.getPartyA());
-            if (partyA != null && partyA.getUserType() == SystemConstants.UserType.NEW
-                    && partyA.getNewUserTradeCount() > 0) {
-
-                partyA.setNewUserTradeCount(partyA.getNewUserTradeCount() - 1);
-
-                // 如果次数用完，升级为 NORMAL
-                if (partyA.getNewUserTradeCount() == 0) {
-                    partyA.setUserType(SystemConstants.UserType.NORMAL);
-                    log.info("User upgraded to NORMAL after completing 3 trades: {}", trade.getPartyA());
-                }
-
-                userMapper.updateById(partyA);
-
-                // 清除缓存
-                String cacheKey = SystemConstants.RedisKey.USER_INFO + trade.getPartyA();
-                redissonClient.getBucket(cacheKey).delete();
-
-                log.info("Decremented newUserTradeCount for partyA: {}", trade.getPartyA());
+            if (trade.getStatus() == SystemConstants.TradeStatus.EXPIRED) {
+                throw new BusinessException("Cannot cancel expired trade");
             }
-
+            // 更新链下状态为待取消（等待链上确认）
+            trade.setStatus(SystemConstants.TradeStatus.PENDING_CHAIN_COMPLETE);
             tradeMapper.updateById(trade);
 
-            // ✅ 改进 4：收取手续费（链上操作）- 新用户豁免
-            /*BigDecimal fee = AmountUtil.calculateFee(trade.getAmount(),
-                    SystemConstants.TradeConstants.FEE_RATE,
-                    SystemConstants.TradeConstants.FEE_DENOMINATOR);
-
-            log.info("🔍 Checking fee: partyAType={}, newUserTradeCount={}, fee={}",
-                    trade.getPartyAType(), partyA.getNewUserTradeCount(), fee);
-
-            // 新用户完全豁免手续费（检查 partyAType 是否为 0 且还有免费次数）
-            boolean isNewUser = (trade.getPartyAType() == null ||
-                    trade.getPartyAType() == 0 ||
-                    "0".equals(String.valueOf(trade.getPartyAType())));
-
-            if (isNewUser && partyA.getNewUserTradeCount() > 0) {
-                log.info("🎉 New user fee waived completely: {}, remaining trades: {}",
-                        trade.getPartyA(), partyA.getNewUserTradeCount());
-                fee = BigDecimal.ZERO;
-            }
-
-            // 只有当手续费>0 时才收取
-            if (fee.compareTo(BigDecimal.ZERO) > 0) {
-                String exchangeContractAddress = blockchainService.getExchangeContractAddress();
-                BigInteger allowance = blockchainService.checkExthAllowance(trade.getPartyA(), exchangeContractAddress);
-
-                log.info("💰 Checking allowance: owner={}, spender={}, allowance={}, need={}",
-                        trade.getPartyA(), exchangeContractAddress, allowance, fee.toBigInteger());
-
-                if (allowance.compareTo(fee.toBigInteger()) < 0) {
-                    log.warn("⚠️ Insufficient EXTH allowance: have={}, need={}, partyA={}",
-                            allowance, fee.toBigInteger(), trade.getPartyA());
-                    throw new BusinessException("EXTH allowance insufficient. Please approve Exchange contract first.");
-                }
-
-                blockchainService.collectFee(chainTradeId, fee.toBigInteger());
-                log.info("✅ Fee collected successfully: amount={}, txHash={}", fee, chainTradeId);
-            } else {
-                log.info("✅ Fee skipped for new user");
-            }*/
-
-            // 更新数据库
-            trade.setStatus(SystemConstants.TradeStatus.COMPLETED);
-            trade.setCompleteTime(LocalDateTime.now());
-            trade.setIsPartyAConfirmed(true);
-            trade.setIsPartyBConfirmed(true);
-
-            // 如果是新用户，减少 newUserTradeCount
-            if ("0".equals(trade.getPartyAType())) {
-                partyA.setNewUserTradeCount(partyA.getNewUserTradeCount() - 1);
-                if (partyA.getNewUserTradeCount() < 0) {
-                    log.error("Negative newUserTradeCount for partyA: {}", trade.getPartyA());
-                    partyA.setNewUserTradeCount(0);
-                }
-
-                userMapper.updateById(partyA);
-
-                // 清除缓存
-                String cacheKey = SystemConstants.RedisKey.USER_INFO + trade.getPartyA();
-                redissonClient.getBucket(cacheKey).delete();
-
-                log.info("Decremented newUserTradeCount for partyA: {}", trade.getPartyA());
-            }
-
-            tradeMapper.updateById(trade);
-
-            // ✅ 改进 5：清除缓存，让事件监听器重新同步
-            String cacheKey = SystemConstants.RedisKey.TRADE_INFO + tradeId;
-            redissonClient.getBucket(cacheKey).delete();
-            // ✅ 改进 6：发送通知（但不更新状态）
-            notificationService.sendTradeNotification(trade.getPartyA(), tradeId, "pending_chain_confirm");
-            notificationService.sendTradeNotification(trade.getPartyB(), tradeId, "pending_chain_confirm");
-
-            log.info("Final confirm submitted to chain: {}, trade: {}, txHash: {}",
-                    address, tradeId, txHash);
+            log.info("Trade {} cancellation initiated by {}", tradeId, address);
 
             return convertToDTO(trade);
 
-
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new BusinessException(500,"System error");
-        } catch (Exception e) {
-            throw new RuntimeException(e);
+            throw new BusinessException("Operation interrupted");
         } finally {
             if (lock.isHeldByCurrentThread()) {
                 lock.unlock();
@@ -529,9 +382,9 @@ public class TradeServiceImpl implements TradeService {
         }
     }
 
+
     /**
      * 创建争议
-     * 流程：先更新链下数据库 → 再调用链上合约（如果需要赔偿）
      */
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -551,8 +404,21 @@ public class TradeServiceImpl implements TradeService {
             throw new BusinessException("Cannot dispute completed trade");
         }
 
+
+        if (trade.getStatus() == SystemConstants.TradeStatus.DISPUTED) {
+            throw new BusinessException("Dispute already submit");
+        }
+
+        if (trade.getStatus() == SystemConstants.TradeStatus.RESOLVED) {
+            throw new BusinessException("Dispute already resolve");
+        }
+
         // 确定被争议方
         String accused = trade.getPartyA().equals(address) ? trade.getPartyB() : trade.getPartyA();
+
+        trade.setStatus(SystemConstants.TradeStatus.PENDING_CHAIN_COMPLETE);
+        trade.setDisputeStatus(SystemConstants.DisputeStatus.PENDING_CHAIN_COMPLETE);
+        tradeMapper.updateById(trade);
 
         // 创建争议记录（链下）
         DisputeRecordEntity dispute = new DisputeRecordEntity();
@@ -561,20 +427,10 @@ public class TradeServiceImpl implements TradeService {
         dispute.setAccused(accused);
         dispute.setReason(param.getReason());
         dispute.setEvidence(param.getEvidence());
-        dispute.setStatus(SystemConstants.DisputeStatus.PENDING);
+        dispute.setProposalStatus(SystemConstants.DisputeStatus.PENDING_CHAIN_COMPLETE);
 
         disputeMapper.insert(dispute);
 
-        // 更新交易状态（链下）
-        trade.setIsDisputed(true);
-        trade.setDisputedParty(accused);
-        trade.setStatus(SystemConstants.TradeStatus.DISPUTED);
-        tradeMapper.updateById(trade);
-
-        // 发送通知
-        notificationService.sendTradeNotification(accused, param.getTradeId(), "disputed");
-
-        log.info("Dispute created: trade {}, initiator: {}", param.getTradeId(), address);
 
         return convertToDisputeDTO(dispute);
     }
@@ -592,50 +448,8 @@ public class TradeServiceImpl implements TradeService {
         }
 
         // 更新争议状态（链下）
-        dispute.setStatus(param.getStatus());
-        dispute.setResult(param.getResult());
-        dispute.setResolveTime(LocalDateTime.now());
+        dispute.setProposalStatus(SystemConstants.DisputeStatus.PENDING_CHAIN_COMPLETE);
         disputeMapper.updateById(dispute);
-
-        TradeRecordEntity trade = tradeMapper.selectByTradeId(dispute.getTradeId());
-
-        if (param.getStatus() == SystemConstants.DisputeStatus.BLACKLISTED) {
-            // 拉黑被争议方（先链下，后链上）
-            userService.blacklistUser(dispute.getAccused(), "Dispute resolved: " + param.getResult());
-
-            // 从金库 Treasure 赔偿损失方（链上操作）
-            try {
-                // 赔偿金额
-                BigDecimal compensationAmount = trade.getAmount();
-
-                // 获取 USDT 合约地址
-                String usdtAddress = blockchainService.getUsdtContractAddress();
-
-                // 从链上执行赔偿
-                String txHash = blockchainService.compensateERC20FromTreasure(
-                        usdtAddress,                    // USDT 代币合约地址
-                        dispute.getInitiator(),         // 受害者地址
-                        compensationAmount.toBigInteger()  // 赔偿金额
-                );
-
-                log.info("Compensation paid from Treasure: txHash={}, amount={}", txHash, compensationAmount);
-
-                // 记录赔偿信息到争议记录表
-                dispute.setResult(param.getResult() + " [已赔偿：" + compensationAmount + ", TX: " + txHash + "]");
-                disputeMapper.updateById(dispute);
-
-            } catch (Exception e) {
-                log.error("Failed to pay compensation from Treasure for dispute {}: {}",
-                        disputeId, e.getMessage());
-                // 赔偿失败不影响争议状态
-            }
-        }
-
-        // 更新交易状态（取消）
-        trade.setStatus(SystemConstants.TradeStatus.CANCELLED);
-        tradeMapper.updateById(trade);
-
-        log.info("Dispute resolved: {}, status: {}", disputeId, param.getStatus());
 
         return convertToDisputeDTO(dispute);
     }
@@ -647,21 +461,12 @@ public class TradeServiceImpl implements TradeService {
      */
     @Override
     public TradeDTO getTradeDetail(String tradeId) {
-        // 优先从缓存获取
-        String cacheKey = SystemConstants.RedisKey.TRADE_INFO + tradeId;
-        RBucket<TradeDTO> bucket = redissonClient.getBucket(cacheKey);
-        TradeDTO cached = bucket.get();
-        if (cached != null) {
-            return cached;
-        }
 
         TradeRecordEntity trade = tradeMapper.selectByTradeId(tradeId);
         if (trade == null) {
             throw new BusinessException("Trade not found");
         }
-
         TradeDTO dto = convertToDTO(trade);
-        bucket.set(dto, 10, TimeUnit.MINUTES);
 
         return dto;
     }
@@ -688,8 +493,7 @@ public class TradeServiceImpl implements TradeService {
         return pageResult.getRecords().stream()
                 .map(entity -> {
                     TradeDTO dto = convertToDTO(entity);
-                    dto
-                            .setMyRole(address.equals(entity.getPartyA()) ? "partyA" : "partyB");
+                    dto.setMyRole(address.equals(entity.getPartyA()) ? "partyA" : "partyB");
                     return dto;
                 })
                 .collect(Collectors.toList());
@@ -710,7 +514,7 @@ public class TradeServiceImpl implements TradeService {
         List<TradeRecordEntity> expiredTrades = tradeMapper.selectList(wrapper);
 
         for (TradeRecordEntity trade : expiredTrades) {
-            trade.setStatus(SystemConstants.TradeStatus.EXPIRED);
+            trade.setStatus(SystemConstants.TradeStatus.DISPUTED);
             tradeMapper.updateById(trade);
 
             log.info("Trade expired: {}", trade.getTradeId());
@@ -719,29 +523,7 @@ public class TradeServiceImpl implements TradeService {
             notificationService.sendTradeNotification(trade.getPartyA(), trade.getTradeId(), "expired");
             notificationService.sendTradeNotification(trade.getPartyB(), trade.getTradeId(), "expired");
         }
-    }
 
-    /**
-     * 更新交易状态
-     */
-    @Override
-    @Transactional(rollbackFor = Exception.class)
-    public void updateStatus(String tradeId, Integer status) {
-        TradeRecordEntity trade = tradeMapper.selectByTradeId(tradeId);
-        if (trade == null) {
-            log.warn("Trade not found for status update: {}", tradeId);
-            return;
-        }
-
-        Integer oldStatus = trade.getStatus();
-        trade.setStatus(status);
-        tradeMapper.updateById(trade);
-
-        // 清除缓存
-        String cacheKey = SystemConstants.RedisKey.TRADE_INFO + tradeId;
-        redissonClient.getBucket(cacheKey).delete();
-
-        log.info("Trade {} status updated from {} to {}", tradeId, oldStatus, status);
     }
 
     /**
@@ -756,17 +538,9 @@ public class TradeServiceImpl implements TradeService {
      */
     private Integer getUserType(String address) {
         UserEntity user = userMapper.selectByAddress(address);
-        return user != null ? user.getUserType() : SystemConstants.UserType.NORMAL;
+        return  user.getUserType();
     }
 
-    /**
-     * 缓存交易信息
-     */
-    private void cacheTradeInfo(TradeRecordEntity trade) {
-        String cacheKey = SystemConstants.RedisKey.TRADE_INFO + trade.getTradeId();
-        TradeDTO dto = convertToDTO(trade);
-        redissonClient.getBucket(cacheKey).set(dto, 10, TimeUnit.MINUTES);
-    }
 
     /**
      * 转换为交易DTO
@@ -789,11 +563,8 @@ public class TradeServiceImpl implements TradeService {
         dto.setExthReward(entity.getExthReward());
         dto.setStatus(entity.getStatus());
         dto.setStatusDesc(getTradeStatusDesc(entity.getStatus()));
-        dto.setIsPartyAConfirmed(entity.getIsPartyAConfirmed());
-        dto.setIsPartyBConfirmed(entity.getIsPartyBConfirmed());
         dto.setMatchTime(entity.getMatchTime());
         dto.setExpireTime(entity.getExpireTime());
-        dto.setIsDisputed(entity.getIsDisputed());
         dto.setDisputedParty(entity.getDisputedParty());
         dto.setTxHashA(entity.getTxHashA());
         dto.setTxHashB(entity.getTxHashB());
@@ -812,8 +583,9 @@ public class TradeServiceImpl implements TradeService {
             case 3: return "B方已确认";
             case 4: return "已完成";
             case 5: return "争议中";
-            case 6: return "已过期";
-            case 7: return "已取消";
+            case 6: return "争议解决";
+            case 7: return "交易取消";
+            case 8: return "等待链上确认";
             default: return "未知";
         }
     }
@@ -831,8 +603,8 @@ public class TradeServiceImpl implements TradeService {
         dto.setAccused(entity.getAccused());
         dto.setReason(entity.getReason());
         dto.setEvidence(entity.getEvidence());
-        dto.setStatus(entity.getStatus());
-        dto.setStatusDesc(getDisputeStatusDesc(entity.getStatus()));
+        dto.setStatus(entity.getProposalStatus());
+        dto.setStatusDesc(getDisputeStatusDesc(entity.getProposalStatus()));
         dto.setResult(entity.getResult());
         dto.setCreateTime(entity.getCreateTime());
         dto.setResolveTime(entity.getResolveTime());
@@ -845,10 +617,10 @@ public class TradeServiceImpl implements TradeService {
      */
     private String getDisputeStatusDesc(int status) {
         switch (status) {
-            case 0: return "待处理";
-            case 1: return "已解决";
-            case 2: return "已驳回";
-            case 3: return "已拉黑";
+            case 0: return "等待链上确认";
+            case 1: return "处理中";
+            case 2: return "已解决";
+            case 3: return "已驳回";
             default: return "未知";
         }
     }

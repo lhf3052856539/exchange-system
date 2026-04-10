@@ -20,36 +20,30 @@ public interface DaoService {
      * @return 交易哈希
      */
 
-    String createProposal(CreateProposalDTO proposalDTO, @CurrentUser String currentAddress);
+    void createProposal(CreateProposalDTO proposalDTO, @CurrentUser String currentAddress);
 
     /**
-     * 投票
-     * @param proposalId 提案 ID
-     * @param support 是否支持
-     * @return 交易哈希
+     * 投票前校验
      */
-    String vote(BigInteger proposalId, boolean support);
+    void vote(BigInteger proposalId, boolean support, String voterAddress);
 
     /**
      * 将提案加入公示期队列
      * @param proposalId 提案 ID
-     * @return 交易哈希
      */
-    String queueProposal(BigInteger proposalId);
+    void queueProposal(BigInteger proposalId);
 
     /**
      * 执行提案
      * @param proposalId 提案 ID
      * @return 交易哈希
      */
-    String executeProposal(BigInteger proposalId,BigInteger eta);
+    void executeProposal(BigInteger proposalId,BigInteger eta);
 
     /**
-     * 取消提案
-     * @param proposalId 提案 ID
-     * @return 交易哈希
+     * 取消提案前校验
      */
-    String cancelProposal(BigInteger proposalId);
+    void cancelProposal(BigInteger proposalId, String callerAddress);
 
     /**
      * 获取提案详情
@@ -107,4 +101,14 @@ public interface DaoService {
      * @return 包含各种代币余额的 Map
      */
     Map<String, Object> getTreasureBalance();
+
+    /**
+     * 根据链上事件同步提案创建信息
+     */
+    void syncProposalFromChain(String proposalId, String proposer, String txHash);
+
+    /**
+     * 同步投票信息
+     */
+    void syncProposalVotesFromChain(BigInteger proposalId);
 }

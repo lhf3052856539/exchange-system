@@ -12,8 +12,7 @@ import org.web3j.model.Exchange;
 import org.web3j.protocol.Web3j;
 import org.web3j.protocol.core.DefaultBlockParameterName;
 import org.web3j.protocol.core.methods.response.TransactionReceipt;
-import org.web3j.tuples.generated.Tuple5;
-import org.web3j.tuples.generated.Tuple7;
+import org.web3j.tuples.generated.*;
 import org.web3j.tx.TransactionManager;
 import org.web3j.tx.gas.ContractGasProvider;
 import org.web3j.utils.Numeric;
@@ -85,10 +84,10 @@ public class ExchangeWrapper extends BaseWrapper{
     /**
      * 创建交易对
      */
-    public String createTradePair(String partyA, String partyB, BigInteger amount) throws Exception {
+    public String createTradePair(String partyA, String partyB, BigInteger amount,BigInteger feeAmount) throws Exception {
         try {
             // 发送交易并获取回执
-            TransactionReceipt receipt = contract.createTradePair(partyA, partyB, amount).send();
+            TransactionReceipt receipt = contract.createTradePair(partyA, partyB, amount,feeAmount).send();
 
             log.info("Transaction sent: txHash={}", receipt.getTransactionHash());
             log.info("Transaction status: {}", receipt.getStatus());
@@ -150,14 +149,6 @@ public class ExchangeWrapper extends BaseWrapper{
                 .getTransactionHash();
     }
 
-    /**
-     * 收取手续费
-     */
-    public String collectFee(BigInteger tradeId, BigInteger feeAmount) throws Exception {
-        return contract.collectFee(tradeId, feeAmount)
-                .send()
-                .getTransactionHash();
-    }
 
     /**
      * 发起争议
@@ -189,9 +180,9 @@ public class ExchangeWrapper extends BaseWrapper{
      * 获取交易信息
      */
     public TradeInfo getTradeInfo(BigInteger tradeId) throws Exception {
-        Tuple7<String, String, BigInteger, BigInteger, Boolean, Boolean, String> result = contract.getTradeInfo(tradeId).send();
+        Tuple9<String, String, BigInteger, BigInteger,BigInteger,BigInteger, String,BigInteger,BigInteger> result = contract.getTradeInfo(tradeId).send();
         return new TradeInfo(result.component1(), result.component2(), result.component3(),
-                result.component4(), result.component5(), result.component6(), result.component7());
+                result.component4(), result.component5(), result.component6(), result.component7(), result.component8(),result.component9());
     }
 
 
@@ -218,20 +209,24 @@ public class ExchangeWrapper extends BaseWrapper{
         public String partyB;
         public BigInteger amount;
         public BigInteger exthReward;
-        public boolean isCompleted;
-        public boolean isDisputed;
+        public BigInteger feeAmount;
+        public BigInteger state;
         public String disputedParty;
+        public BigInteger completeTime;
+        public BigInteger createTime;
 
         public TradeInfo(String partyA, String partyB, BigInteger amount,
-                         BigInteger exthReward, boolean isCompleted,
-                         boolean isDisputed, String disputedParty) {
+                         BigInteger exthReward,BigInteger feeAmount,BigInteger state, String disputedParty,BigInteger completeTime,
+                         BigInteger createTime) {
             this.partyA = partyA;
             this.partyB = partyB;
             this.amount = amount;
             this.exthReward = exthReward;
-            this.isCompleted = isCompleted;
-            this.isDisputed = isDisputed;
+            this.feeAmount = feeAmount;
+            this.state = state;
             this.disputedParty = disputedParty;
+            this.completeTime = completeTime;
+            this.createTime = createTime;
         }
 
 
@@ -276,6 +271,67 @@ public class ExchangeWrapper extends BaseWrapper{
             DefaultBlockParameterName endBlock) {
         return contract.userBlacklistedEventFlowable(startBlock, endBlock);
     }
+
+    /**
+     * 监听 UserUpgraded 事件
+     */
+    public Flowable<Exchange.UserUpgradedEventResponse> userUpgradedEventFlowable(
+            DefaultBlockParameterName startBlock,
+            DefaultBlockParameterName endBlock) {
+        return contract.userUpgradedEventFlowable(startBlock, endBlock);
+    }
+
+    /**
+     * 监听 PartyAConfirmed 事件
+     */
+    public Flowable<Exchange.PartyAConfirmedEventResponse> partyAConfirmedEventFlowable(
+            DefaultBlockParameterName startBlock,
+            DefaultBlockParameterName endBlock) {
+        return contract.partyAConfirmedEventFlowable(startBlock, endBlock);
+    }
+
+    /**
+     * 监听 PartyBConfirmed 事件
+     */
+    public Flowable<Exchange.PartyBConfirmedEventResponse> partyBConfirmedEventFlowable(
+            DefaultBlockParameterName startBlock,
+            DefaultBlockParameterName endBlock) {
+        return contract.partyBConfirmedEventFlowable(startBlock, endBlock);
+    }
+
+    /**
+     * 监听 TradeCancelled 事件
+     */
+    public Flowable<Exchange.TradeCancelledEventResponse> tradeCancelledEventFlowable(
+            DefaultBlockParameterName startBlock,
+            DefaultBlockParameterName endBlock) {
+        return contract.tradeCancelledEventFlowable(startBlock, endBlock);
+    }
+
+    /**
+     * 监听 TradeDisputed 事件
+     */
+    public Flowable<Exchange.TradeDisputedEventResponse> tradeDisputedEventFlowable(
+            DefaultBlockParameterName startBlock,
+            DefaultBlockParameterName endBlock) {
+        return contract.tradeDisputedEventFlowable(startBlock, endBlock);
+    }
+
+    /**
+     * 监听 TradeResolved 事件
+     */
+    public Flowable<Exchange.TradeResolvedEventResponse> tradeResolvedEventFlowable(
+            DefaultBlockParameterName startBlock,
+            DefaultBlockParameterName endBlock) {
+        return contract.tradeResolvedEventFlowable(startBlock, endBlock);
+    }
+
+    // 手续费收取事件订阅流
+    public Flowable<Exchange.FeeCollectedEventResponse> feeCollectedEventFlowable(DefaultBlockParameterName startBlock, DefaultBlockParameterName endBlock) {
+        return contract.feeCollectedEventFlowable(startBlock, endBlock);
+    }
+
+
     /**
      * 获取合约地址
      */
