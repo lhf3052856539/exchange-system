@@ -13,7 +13,7 @@ import java.time.LocalDateTime;
 public class DisputeDTO implements Serializable {
     private static final long serialVersionUID = 1L;
     private Long id;
-    private String tradeId;
+    private String chainTradeId;
     private String initiator;
     private String accused;
     private String reason;

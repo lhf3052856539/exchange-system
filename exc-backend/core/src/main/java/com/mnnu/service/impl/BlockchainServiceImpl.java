@@ -1,41 +1,23 @@
 package com.mnnu.service.impl;
 
-import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.mnnu.constant.SystemConstants;
 import com.mnnu.dto.BlockchainTransactionDTO;
-import com.mnnu.dto.TradeDTO;
-import com.mnnu.entity.ProposalRecordEntity;
-import com.mnnu.entity.TradeRecordEntity;
-import com.mnnu.entity.UserEntity;
-import com.mnnu.mapper.NotificationMapper;
-import com.mnnu.mapper.ProposalRecordMapper;
-import com.mnnu.mapper.TradeMapper;
-import com.mnnu.mapper.UserMapper;
 import com.mnnu.service.BlockchainService;
-import com.mnnu.service.NotificationService;
-import com.mnnu.service.TradeService;
-import com.mnnu.service.UserService;
+import com.mnnu.utils.GraphqlClient;
 import com.mnnu.utils.Web3jUtil;
 import com.mnnu.wrapper.*;
 import io.reactivex.disposables.Disposable;
 import lombok.extern.slf4j.Slf4j;
-import org.redisson.api.RedissonClient;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Service;
-import org.web3j.model.Airdrop;
-import org.web3j.model.Dao;
-import org.web3j.model.EXTH;
-import org.web3j.model.Exchange;
 import org.web3j.protocol.Web3j;
 import org.web3j.protocol.core.DefaultBlockParameterName;
 import org.web3j.protocol.core.methods.response.EthGetTransactionReceipt;
 import org.web3j.protocol.core.methods.response.Transaction;
 import org.web3j.protocol.core.methods.response.TransactionReceipt;
-import org.web3j.tuples.generated.Tuple7;
-
-import javax.annotation.PostConstruct;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.math.BigInteger;
@@ -43,8 +25,9 @@ import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.*;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+
+import static com.mnnu.constant.SystemConstants.RedisKey.LAST_SYNC_KEY;
 
 @Slf4j
 @Service
@@ -70,62 +53,531 @@ public class BlockchainServiceImpl implements BlockchainService {
 
     @Autowired
     private Web3j web3j;
-
     @Autowired
     private RabbitTemplate rabbitTemplate;
-
-
 
     @Autowired
     private RedisTemplate<String, String> redisTemplate;
 
-
-    @Autowired
-    private TradeService tradeService;
-
-
-    @Autowired
-    private TreasureWrapper treasureContract;
-
-    @Autowired
-    private ProposalRecordMapper proposalRecordMapper;
-    @Autowired
-    private TradeMapper tradeMapper;
-    @Autowired
-    private NotificationService notificationService;
-
-    @Autowired
-    private UserMapper userMapper;
-
-    private RedissonClient redissonClient;
-
-    @Autowired
-    private UserService userService;
-    @Autowired
-    private  DaoWrapper daoWrapper;
-    @Autowired
-    private ExchangeWrapper exchangeWrapper;
     @Autowired
     private MultiSigWalletWrapper multiSigWalletWrapper;
     @Autowired
     private TreasureWrapper treasureWrapper;
 
+    @Autowired
+    private GraphqlClient graphqlClient;
 
+    private static final int BATCH_SIZE = 100;
+
+
+    @Override
+    public long syncAllEvents(long lastTimestamp) {
+        long maxTimestamp = lastTimestamp;
+
+        // 第一批：查询非多签钱包相关事件
+        try {
+            JsonNode generalResult = graphqlClient.getGeneralEvents(lastTimestamp, BATCH_SIZE);
+            if (generalResult != null && generalResult.has("data")) {
+                JsonNode data = generalResult.get("data");
+                if (data != null) {
+                    maxTimestamp = processGeneralEvents(data, maxTimestamp);
+                }
+            }
+        } catch (Exception e) {
+            log.error("Error processing general events batch", e);
+        }
+
+        // 第二批：查询多签钱包相关事件
+        try {
+            JsonNode multiSigResult = graphqlClient.getMultiSigEvents(lastTimestamp, BATCH_SIZE);
+            if (multiSigResult != null && multiSigResult.has("data")) {
+                JsonNode data = multiSigResult.get("data");
+                if (data != null) {
+                    maxTimestamp = processMultiSigEvents(data, maxTimestamp);
+                }
+            }
+        } catch (Exception e) {
+            log.error("Error processing multi-sig wallet events batch", e);
+        }
+
+        return maxTimestamp;
+    }
 
     /**
-     * 更新用户余额缓存
+     * 处理非多签钱包相关事件（第一批）
      */
-    @Override
-    public void updateExthBalanceOnChain(String address) {
-        // 此方法已移至 UserServiceImpl 直接调用 Wrapper，此处保留接口实现或可删除
-        log.debug("Update balance request for: {}", address);
+    private long processGeneralEvents(JsonNode data, long maxTimestamp) {
+        // 1. UserBlacklisted
+        if (data.has("userBlacklisteds")) {
+            for (JsonNode event : data.get("userBlacklisteds")) {
+                try {
+                    long ts = event.get("blockTimestamp").asLong();
+                    if (ts > maxTimestamp) maxTimestamp = ts;
+
+                    Map<String, Object> msg = new HashMap<>();
+                    msg.put("event", "UserBlacklisted");
+                    msg.put("user", event.get("user").asText());
+                    msg.put("txHash", event.get("transactionHash").asText());
+                    msg.put("blockNumber", event.get("blockNumber").asLong());
+                    rabbitTemplate.convertAndSend(SystemConstants.MQQueue.BLOCKCHAIN_EVENT, msg);
+                } catch (Exception e) { log.error("Error processing UserBlacklisted event", e); }
+            }
+        }
+
+        // 2. TradeCreate
+        if (data.has("tradeCreates")) {
+            for (JsonNode event : data.get("tradeCreates")) {
+                try {
+                    long ts = event.get("blockTimestamp").asLong();
+                    if (ts > maxTimestamp) maxTimestamp = ts;
+
+                    Map<String, Object> msg = new HashMap<>();
+                    msg.put("event", "TradeCreate");
+                    msg.put("chainTradeId", event.get("chainTradeId").asText());
+                    msg.put("tradeId", event.get("tradeId").asText());
+                    msg.put("partyA", event.get("partyA").asText());
+                    msg.put("partyB", event.get("partyB").asText());
+                    msg.put("amount", event.get("amount").asText());
+                    msg.put("txHash", event.get("transactionHash").asText());
+                    rabbitTemplate.convertAndSend(SystemConstants.MQQueue.BLOCKCHAIN_EVENT, msg);
+                } catch (Exception e) { log.error("Error processing TradeCreate event", e); }
+            }
+        }
+
+        // 3. TradeCompleted
+        if (data.has("tradeCompleteds")) {
+            for (JsonNode event : data.get("tradeCompleteds")) {
+                try {
+                    long ts = event.get("blockTimestamp").asLong();
+                    if (ts > maxTimestamp) maxTimestamp = ts;
+
+                    Map<String, Object> msg = new HashMap<>();
+                    msg.put("event", "TradeCompleted");
+                    msg.put("tradeId", event.get("tradeId").asText());
+                    msg.put("txHash", event.get("transactionHash").asText());
+                    rabbitTemplate.convertAndSend(SystemConstants.MQQueue.BLOCKCHAIN_EVENT, msg);
+                } catch (Exception e) { log.error("Error processing TradeCompleted event", e); }
+            }
+        }
+
+        // 4. TradeDisputed
+        if (data.has("tradeDisputeds")) {
+            for (JsonNode event : data.get("tradeDisputeds")) {
+                try {
+                    long ts = event.get("blockTimestamp").asLong();
+                    if (ts > maxTimestamp) maxTimestamp = ts;
+
+                    Map<String, Object> msg = new HashMap<>();
+                    msg.put("event", "TradeDisputed");
+                    msg.put("tradeId", event.get("tradeId").asText());
+                    msg.put("disputedParty", event.get("disputedParty").asText());
+                    msg.put("txHash", event.get("transactionHash").asText());
+                    rabbitTemplate.convertAndSend(SystemConstants.MQQueue.BLOCKCHAIN_EVENT, msg);
+                } catch (Exception e) { log.error("Error processing TradeDisputed event", e); }
+            }
+        }
+
+        // 5. TradeCancelled
+        if (data.has("tradeCancelleds")) {
+            for (JsonNode event : data.get("tradeCancelleds")) {
+                try {
+                    long ts = event.get("blockTimestamp").asLong();
+                    if (ts > maxTimestamp) maxTimestamp = ts;
+
+                    Map<String, Object> msg = new HashMap<>();
+                    msg.put("event", "TradeCancelled");
+                    msg.put("tradeId", event.get("tradeId").asText());
+                    msg.put("txHash", event.get("transactionHash").asText());
+                    msg.put("blockNumber", event.get("blockNumber").asLong());
+                    rabbitTemplate.convertAndSend(SystemConstants.MQQueue.BLOCKCHAIN_EVENT, msg);
+                } catch (Exception e) { log.error("Error processing TradeCancelled event", e); }
+            }
+        }
+
+        // 6. TradeExpired
+        if (data.has("tradeExpireds")) {
+            for (JsonNode event : data.get("tradeExpireds")) {
+                try {
+                    long ts = event.get("blockTimestamp").asLong();
+                    if (ts > maxTimestamp) maxTimestamp = ts;
+
+                    Map<String, Object> msg = new HashMap<>();
+                    msg.put("event", "TradeExpired");
+                    msg.put("tradeId", event.get("tradeId").asText());
+                    msg.put("txHash", event.get("transactionHash").asText());
+                    msg.put("blockNumber", event.get("blockNumber").asLong());
+                    rabbitTemplate.convertAndSend(SystemConstants.MQQueue.BLOCKCHAIN_EVENT, msg);
+                } catch (Exception e) { log.error("Error processing TradeExpired event", e); }
+            }
+        }
+
+        // 7. TradeResolved
+        if (data.has("tradeResolveds")) {
+            for (JsonNode event : data.get("tradeResolveds")) {
+                try {
+                    long ts = event.get("blockTimestamp").asLong();
+                    if (ts > maxTimestamp) maxTimestamp = ts;
+
+                    Map<String, Object> msg = new HashMap<>();
+                    msg.put("event", "TradeResolved");
+                    msg.put("tradeId", event.get("tradeId").asText());
+                    msg.put("txHash", event.get("transactionHash").asText());
+                    msg.put("blockNumber", event.get("blockNumber").asLong());
+                    rabbitTemplate.convertAndSend(SystemConstants.MQQueue.BLOCKCHAIN_EVENT, msg);
+                } catch (Exception e) { log.error("Error processing TradeResolved event", e); }
+            }
+        }
+
+        // 8. DaoProposalCreated
+        if (data.has("proposalCreateds")) {
+            for (JsonNode event : data.get("proposalCreateds")) {
+                try {
+                    long ts = event.get("blockTimestamp").asLong();
+                    if (ts > maxTimestamp) maxTimestamp = ts;
+
+                    Map<String, Object> msg = new HashMap<>();
+                    msg.put("event", "ProposalCreated");
+                    msg.put("proposalId", event.get("proposalId").asText());
+                    msg.put("proposer", event.get("proposer").asText());
+                    msg.put("description", event.get("description").asText());
+                    msg.put("txHash", event.get("transactionHash").asText());
+                    rabbitTemplate.convertAndSend(SystemConstants.MQQueue.BLOCKCHAIN_EVENT, msg);
+                } catch (Exception e) { log.error("Error processing DaoProposalCreated event", e); }
+            }
+        }
+
+        // 9. DaoVoteCast
+        if (data.has("voteCasts")) {
+            for (JsonNode event : data.get("voteCasts")) {
+                try {
+                    long ts = event.get("blockTimestamp").asLong();
+                    if (ts > maxTimestamp) maxTimestamp = ts;
+
+                    Map<String, Object> msg = new HashMap<>();
+                    msg.put("event", "VoteCast");
+                    msg.put("proposalId", event.get("proposalId").asText());
+                    msg.put("voter", event.get("voter").asText());
+                    msg.put("support", event.get("support").asBoolean());
+                    msg.put("weight", event.get("weight").asText());
+                    msg.put("txHash", event.get("transactionHash").asText());
+                    rabbitTemplate.convertAndSend(SystemConstants.MQQueue.BLOCKCHAIN_EVENT, msg);
+                } catch (Exception e) { log.error("Error processing DaoVoteCast event", e); }
+            }
+        }
+
+        // 10. ProposalQueued
+        if (data.has("proposalQueueds")) {
+            for (JsonNode event : data.get("proposalQueueds")) {
+                try {
+                    long ts = event.get("blockTimestamp").asLong();
+                    if (ts > maxTimestamp) maxTimestamp = ts;
+
+                    Map<String, Object> msg = new HashMap<>();
+                    msg.put("event", "ProposalQueued");
+                    msg.put("proposalId", event.get("proposalId").asText());
+                    msg.put("eta", event.get("eta").asText());
+                    msg.put("txHash", event.get("transactionHash").asText());
+                    rabbitTemplate.convertAndSend(SystemConstants.MQQueue.BLOCKCHAIN_EVENT, msg);
+                } catch (Exception e) { log.error("Error processing ProposalQueued event", e); }
+            }
+        }
+
+        // 11. ProposalExecuted
+        if (data.has("proposalExecuteds")) {
+            for (JsonNode event : data.get("proposalExecuteds")) {
+                try {
+                    long ts = event.get("blockTimestamp").asLong();
+                    if (ts > maxTimestamp) maxTimestamp = ts;
+
+                    Map<String, Object> msg = new HashMap<>();
+                    msg.put("event", "ProposalExecuted");
+                    msg.put("proposalId", event.get("proposalId").asText());
+                    msg.put("txHash", event.get("transactionHash").asText());
+                    rabbitTemplate.convertAndSend(SystemConstants.MQQueue.BLOCKCHAIN_EVENT, msg);
+                } catch (Exception e) { log.error("Error processing ProposalExecuted event", e); }
+            }
+        }
+
+        // 12. ProposalCanceled
+        if (data.has("proposalCanceleds")) {
+            for (JsonNode event : data.get("proposalCanceleds")) {
+                try {
+                    long ts = event.get("blockTimestamp").asLong();
+                    if (ts > maxTimestamp) maxTimestamp = ts;
+
+                    Map<String, Object> msg = new HashMap<>();
+                    msg.put("event", "ProposalCanceled");
+                    msg.put("proposalId", event.get("proposalId").asText());
+                    msg.put("txHash", event.get("transactionHash").asText());
+                    rabbitTemplate.convertAndSend(SystemConstants.MQQueue.BLOCKCHAIN_EVENT, msg);
+                } catch (Exception e) { log.error("Error processing ProposalCanceled event", e); }
+            }
+        }
+
+        // 13. PartyAConfirmed
+        if (data.has("partyAConfirmeds")) {
+            for (JsonNode event : data.get("partyAConfirmeds")) {
+                try {
+                    long ts = event.get("blockTimestamp").asLong();
+                    if (ts > maxTimestamp) maxTimestamp = ts;
+
+                    Map<String, Object> msg = new HashMap<>();
+                    msg.put("event", "PartyAConfirmed");
+                    msg.put("tradeId", event.get("tradeId").asText());
+                    msg.put("party", event.get("party").asText());
+                    msg.put("txHash", event.get("txHash").asText());
+                    msg.put("blockNumber", event.get("blockNumber").asLong());
+                    rabbitTemplate.convertAndSend(SystemConstants.MQQueue.BLOCKCHAIN_EVENT, msg);
+                } catch (Exception e) { log.error("Error processing PartyAConfirmed event", e); }
+            }
+        }
+
+        // 14. PartyBConfirmed
+        if (data.has("partyBConfirmeds")) {
+            for (JsonNode event : data.get("partyBConfirmeds")) {
+                try {
+                    long ts = event.get("blockTimestamp").asLong();
+                    if (ts > maxTimestamp) maxTimestamp = ts;
+
+                    Map<String, Object> msg = new HashMap<>();
+                    msg.put("event", "PartyBConfirmed");
+                    msg.put("tradeId", event.get("tradeId").asText());
+                    msg.put("party", event.get("party").asText());
+                    msg.put("txHash", event.get("txHash").asText());
+                    msg.put("blockNumber", event.get("blockNumber").asLong());
+                    rabbitTemplate.convertAndSend(SystemConstants.MQQueue.BLOCKCHAIN_EVENT, msg);
+                } catch (Exception e) { log.error("Error processing PartyBConfirmed event", e); }
+            }
+        }
+
+        // 15. FeeCollected
+        if (data.has("feeCollecteds")) {
+            for (JsonNode event : data.get("feeCollecteds")) {
+                try {
+                    long ts = event.get("blockTimestamp").asLong();
+                    if (ts > maxTimestamp) maxTimestamp = ts;
+
+                    Map<String, Object> msg = new HashMap<>();
+                    msg.put("event", "FeeCollected");
+                    msg.put("tradeId", event.get("tradeId").asText());
+                    msg.put("feePayerA", event.get("feePayerA").asText());
+                    msg.put("feePayerB", event.get("feePayerB").asText());
+                    msg.put("feeAmount", event.get("feeAmount").asText());
+                    msg.put("txHash", event.get("transactionHash").asText());
+                    rabbitTemplate.convertAndSend(SystemConstants.MQQueue.BLOCKCHAIN_EVENT, msg);
+                } catch (Exception e) { log.error("Error processing FeeCollected event", e); }
+            }
+        }
+
+        // 16. CompensationPaid
+        if (data.has("compensationPaids")) {
+            for (JsonNode event : data.get("compensationPaids")) {
+                try {
+                    long ts = event.get("blockTimestamp").asLong();
+                    if (ts > maxTimestamp) maxTimestamp = ts;
+
+                    Map<String, Object> msg = new HashMap<>();
+                    msg.put("event", "CompensationPaid");
+                    msg.put("victim", event.get("victim").asText());
+                    msg.put("amount", event.get("amount").asText());
+                    msg.put("txHash", event.get("transactionHash").asText());
+                    rabbitTemplate.convertAndSend(SystemConstants.MQQueue.BLOCKCHAIN_EVENT, msg);
+                } catch (Exception e) { log.error("Error processing CompensationPaid event", e); }
+            }
+        }
+
+        // 17. UserUpgraded
+        if (data.has("userUpgradeds")) {
+            for (JsonNode event : data.get("userUpgradeds")) {
+                try {
+                    long ts = event.get("blockTimestamp").asLong();
+                    if (ts > maxTimestamp) maxTimestamp = ts;
+
+                    Map<String, Object> msg = new HashMap<>();
+                    msg.put("event", "UserUpgraded");
+                    msg.put("user", event.get("user").asText());
+                    msg.put("newType", event.get("newType").asInt());
+                    msg.put("txHash", event.get("transactionHash").asText());
+                    rabbitTemplate.convertAndSend(SystemConstants.MQQueue.BLOCKCHAIN_EVENT, msg);
+                } catch (Exception e) { log.error("Error processing UserUpgraded event", e); }
+            }
+        }
+
+        // 18. AirdropClaimed
+        if (data.has("airdropClaimeds")) {
+            for (JsonNode event : data.get("airdropClaimeds")) {
+                try {
+                    long ts = event.get("blockTimestamp").asLong();
+                    if (ts > maxTimestamp) maxTimestamp = ts;
+
+                    Map<String, Object> msg = new HashMap<>();
+                    msg.put("event", "AirdropClaimed");
+                    msg.put("claimant", event.get("claimant").asText());
+                    msg.put("amount", event.get("amount").asText());
+                    msg.put("txHash", event.get("transactionHash").asText());
+                    rabbitTemplate.convertAndSend(SystemConstants.MQQueue.BLOCKCHAIN_EVENT, msg);
+                } catch (Exception e) { log.error("Error processing AirdropClaimed event", e); }
+            }
+        }
+
+        return maxTimestamp;
     }
+
+    /**
+     * 处理多签钱包相关事件（第二批）
+     */
+    private long processMultiSigEvents(JsonNode data, long maxTimestamp) {
+        // 1. MultiSigProposalCreated (仲裁提案创建)
+        if (data.has("multiSigWalletProposalCreateds")) {
+            for (JsonNode event : data.get("multiSigWalletProposalCreateds")) {
+                try {
+                    long ts = event.get("blockTimestamp").asLong();
+                    if (ts > maxTimestamp) maxTimestamp = ts;
+
+                    Map<String, Object> msg = new HashMap<>();
+                    msg.put("event", "ArbitrationProposalCreated");
+                    msg.put("proposalId", event.get("proposalId").asText());
+                    msg.put("tradeId", event.get("tradeId").asText());
+                    msg.put("accusedParty", event.get("accusedParty").asText());
+                    msg.put("txHash", event.get("transactionHash").asText());
+                    rabbitTemplate.convertAndSend(SystemConstants.MQQueue.BLOCKCHAIN_EVENT, msg);
+                } catch (Exception e) { log.error("Error processing MultiSigProposalCreated event", e); }
+            }
+        }
+
+        // 2. MultiSigProposalExecuted (仲裁提案执行)
+        if (data.has("multiSigWalletProposalExecuteds")) {
+            for (JsonNode event : data.get("multiSigWalletProposalExecuteds")) {
+                try {
+                    long ts = event.get("blockTimestamp").asLong();
+                    if (ts > maxTimestamp) maxTimestamp = ts;
+
+                    Map<String, Object> msg = new HashMap<>();
+                    msg.put("event", "ArbitrationProposalExecuted");
+                    msg.put("proposalId", event.get("proposalId").asText());
+                    msg.put("accusedParty", event.get("accusedParty").asText());
+                    msg.put("victimParty", event.get("victimParty").asText());
+                    msg.put("txHash", event.get("transactionHash").asText());
+                    rabbitTemplate.convertAndSend(SystemConstants.MQQueue.BLOCKCHAIN_EVENT, msg);
+                } catch (Exception e) { log.error("Error processing MultiSigProposalExecuted event", e); }
+            }
+        }
+
+        // 3. ProposalRejected (仲裁提案拒绝)
+        if (data.has("proposalRejecteds")) {
+            for (JsonNode event : data.get("proposalRejecteds")) {
+                try {
+                    long ts = event.get("blockTimestamp").asLong();
+                    if (ts > maxTimestamp) maxTimestamp = ts;
+
+                    Map<String, Object> msg = new HashMap<>();
+                    msg.put("event", "ArbitrationProposalRejected");
+                    msg.put("proposalId", event.get("proposalId").asText());
+                    msg.put("txHash", event.get("transactionHash").asText());
+                    rabbitTemplate.convertAndSend(SystemConstants.MQQueue.BLOCKCHAIN_EVENT, msg);
+                } catch (Exception e) { log.error("Error processing ProposalRejected event", e); }
+            }
+        }
+
+        // 4. ProposalExpired (仲裁提案过期)
+        if (data.has("proposalExpireds")) {
+            for (JsonNode event : data.get("proposalExpireds")) {
+                try {
+                    long ts = event.get("blockTimestamp").asLong();
+                    if (ts > maxTimestamp) maxTimestamp = ts;
+
+                    Map<String, Object> msg = new HashMap<>();
+                    msg.put("event", "ArbitrationProposalExpired");
+                    msg.put("proposalId", event.get("proposalId").asText());
+                    msg.put("txHash", event.get("transactionHash").asText());
+                    rabbitTemplate.convertAndSend(SystemConstants.MQQueue.BLOCKCHAIN_EVENT, msg);
+                } catch (Exception e) { log.error("Error processing ProposalExpired event", e); }
+            }
+        }
+
+        // 5. ArbitrationProposalVoted (仲裁投票)
+        if (data.has("multiSigWalletVoteCasts")) {
+            for (JsonNode event : data.get("multiSigWalletVoteCasts")) {
+                try {
+                    long ts = event.get("blockTimestamp").asLong();
+                    if (ts > maxTimestamp) maxTimestamp = ts;
+
+                    Map<String, Object> msg = new HashMap<>();
+                    msg.put("event", "ArbitrationProposalVoted");
+                    msg.put("proposalId", event.get("proposalId").asText());
+                    msg.put("voter", event.get("voter").asText());
+                    msg.put("support", event.get("support").asBoolean());
+                    msg.put("txHash", event.get("transactionHash").asText());
+                    rabbitTemplate.convertAndSend(SystemConstants.MQQueue.BLOCKCHAIN_EVENT, msg);
+                } catch (Exception e) { log.error("Error processing ArbitrationProposalVoted event", e); }
+            }
+        }
+
+        // 6. CommitteeMemberAdded (委员会成员添加)
+        if (data.has("committeeMemberAddeds")) {
+            for (JsonNode event : data.get("committeeMemberAddeds")) {
+                try {
+                    long ts = event.get("blockTimestamp").asLong();
+                    if (ts > maxTimestamp) maxTimestamp = ts;
+
+                    Map<String, Object> msg = new HashMap<>();
+                    msg.put("event", "CommitteeMemberAdded");
+                    msg.put("member", event.get("member").asText());
+                    msg.put("txHash", event.get("transactionHash").asText());
+                    rabbitTemplate.convertAndSend(SystemConstants.MQQueue.BLOCKCHAIN_EVENT, msg);
+                } catch (Exception e) { log.error("Error processing CommitteeMemberAdded event", e); }
+            }
+        }
+
+        // 7. CommitteeMemberRemoved (委员会成员移除)
+        if (data.has("committeeMemberRemoveds")) {
+            for (JsonNode event : data.get("committeeMemberRemoveds")) {
+                try {
+                    long ts = event.get("blockTimestamp").asLong();
+                    if (ts > maxTimestamp) maxTimestamp = ts;
+
+                    Map<String, Object> msg = new HashMap<>();
+                    msg.put("event", "CommitteeMemberRemoved");
+                    msg.put("member", event.get("member").asText());
+                    msg.put("txHash", event.get("transactionHash").asText());
+                    rabbitTemplate.convertAndSend(SystemConstants.MQQueue.BLOCKCHAIN_EVENT, msg);
+                } catch (Exception e) { log.error("Error processing CommitteeMemberRemoved event", e); }
+            }
+        }
+
+        return maxTimestamp;
+    }
+
+
+
+
+    @Override
+    public Long getLastSyncTimestamp() {
+        Object value = redisTemplate.opsForValue().get(LAST_SYNC_KEY);
+        if (value == null) {
+            return 0L;
+        }
+        if (value instanceof Number) {
+            return ((Number) value).longValue();
+        }
+        try {
+            return Long.parseLong(value.toString());
+        } catch (NumberFormatException e) {
+            log.warn("Invalid timestamp format in Redis, resetting to 0", e);
+            return 0L;
+        }
+    }
+
+    @Override
+    public void updateLastSyncTimestamp(long timestamp) {
+        redisTemplate.opsForValue().set(LAST_SYNC_KEY, String.valueOf(timestamp), 30, TimeUnit.DAYS);
+    }
+
 
     @Override
     public void reconcilePendingTrades() {
         log.info("Reconciliation task executed.");
     }
-
 
 
     // 保存订阅引用，用于后续取消订阅
@@ -284,7 +736,7 @@ public class BlockchainServiceImpl implements BlockchainService {
     /**
      * 初始化事件订阅
      */
-    @PostConstruct
+    //@PostConstruct
     public void initEventSubscriptions() {
         log.info("Initializing event subscriptions...");
         try {
@@ -319,15 +771,14 @@ public class BlockchainServiceImpl implements BlockchainService {
                 });
         disposables.add(transferSub);
 
-        // Exchange TradeMatched 事件
-        Disposable tradeMatchedSub = exchangeContract.tradeMatchedEventFlowable(DefaultBlockParameterName.LATEST, DefaultBlockParameterName.LATEST)
+        // Exchange TradeCreate 事件
+        Disposable tradeMatchedSub = exchangeContract.tradeCreateEventFlowable(DefaultBlockParameterName.LATEST, DefaultBlockParameterName.LATEST)
                 .subscribe(event -> {
                     Map<String, Object> msg = new HashMap<>();
                     msg.put("event", "TradeMatched");
+                    msg.put("chainTradeId", event.chainTradeId.toString());
                     msg.put("tradeId", event.tradeId.toString());
                     msg.put("partyA", event.partyA);
-                    msg.put("partyB", event.partyB);
-                    msg.put("amount", event.amount.toString());
                     msg.put("txHash", event.log.getTransactionHash());
                     rabbitTemplate.convertAndSend(SystemConstants.MQQueue.BLOCKCHAIN_EVENT, msg);
                 });
@@ -568,20 +1019,28 @@ public class BlockchainServiceImpl implements BlockchainService {
         disposables.add(feeCollectedSub);
 
         // CompensationPaid 事件 (赔偿支付 )
-        try {
-            Disposable compensationPaidSub = treasureWrapper.compensationPaidEventFlowable(DefaultBlockParameterName.LATEST, DefaultBlockParameterName.LATEST)
-                    .subscribe(event -> {
-                        Map<String, Object> msg = new HashMap<>();
-                        msg.put("event", "CompensationPaid");
-                        msg.put("victim", event.victim);
-                        msg.put("amount", event.amount.toString());
-                        msg.put("txHash", event.log.getTransactionHash());
-                        rabbitTemplate.convertAndSend(SystemConstants.MQQueue.BLOCKCHAIN_EVENT, msg);
-                    });
-            disposables.add(compensationPaidSub);
-        } catch (Exception e) {
-            log.warn("CompensationPaid event subscription skipped (method may not exist in wrapper)", e);
-        }
+        Disposable compensationPaidSub = treasureWrapper.compensationPaidEventFlowable(DefaultBlockParameterName.LATEST, DefaultBlockParameterName.LATEST)
+                .subscribe(event -> {
+                    Map<String, Object> msg = new HashMap<>();
+                    msg.put("event", "CompensationPaid");
+                    msg.put("victim", event.victim);
+                    msg.put("amount", event.amount.toString());
+                    msg.put("txHash", event.log.getTransactionHash());
+                    rabbitTemplate.convertAndSend(SystemConstants.MQQueue.BLOCKCHAIN_EVENT, msg);
+                });
+        disposables.add(compensationPaidSub);
+
+        // TradeExpired 事件 (交易过期)
+        Disposable tradeExpiredSub = exchangeContract.tradeExpiredEventFlowable(DefaultBlockParameterName.LATEST, DefaultBlockParameterName.LATEST)
+                .subscribe(event -> {
+                    Map<String, Object> msg = new HashMap<>();
+                    msg.put("event", "TradeExpired");
+                    msg.put("tradeId", event.tradeId.toString());
+                    msg.put("txHash", event.log.getTransactionHash());
+                    msg.put("blockNumber", event.log.getBlockNumber());
+                    rabbitTemplate.convertAndSend(SystemConstants.MQQueue.BLOCKCHAIN_EVENT, msg);
+                });
+        disposables.add(tradeExpiredSub);
 
         log.info("All event subscriptions initialized. Total: {}", disposables.size());
     }
@@ -714,6 +1173,3 @@ public class BlockchainServiceImpl implements BlockchainService {
         return System.getenv("MULTISIG_WALLET_ADDRESS");
     }
 }
-
-
-

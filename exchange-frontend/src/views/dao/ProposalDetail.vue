@@ -255,13 +255,19 @@ const queueTimeRemaining = computed(() => {
 })
 
 const canVote = computed(() => {
-  return currentProposal.value?.state === ProposalState.Active &&
+  return (currentProposal.value?.state === ProposalState.Pending ||
+          currentProposal.value?.state === ProposalState.Active) &&
       !hasUserVoted.value &&
       walletStore.isConnected
 })
 
 const canQueue = computed(() => {
-  return currentProposal.value?.state === ProposalState.Succeeded &&
+  const isSucceeded = currentProposal.value?.state === ProposalState.Succeeded
+  const isVotingEnded = currentProposal.value?.deadline &&
+      Math.floor(Date.now() / 1000) >= currentProposal.value.deadline
+  const hasVotes = (Number(currentProposal.value?.yesVotes) || 0) > 0
+
+  return (isSucceeded || (currentProposal.value?.state === ProposalState.Active && isVotingEnded && hasVotes)) &&
       walletStore.isConnected
 })
 
@@ -271,7 +277,8 @@ const canExecute = computed(() => {
 })
 
 const canCancel = computed(() => {
-  return (currentProposal.value?.state === ProposalState.Active ||
+  return (currentProposal.value?.state === ProposalState.Pending ||
+          currentProposal.value?.state === ProposalState.Active ||
           currentProposal.value?.state === ProposalState.Succeeded) &&
       walletStore.isConnected
 })
@@ -345,6 +352,7 @@ async function handleQueue() {
     }
   }
 }
+
 
 async function handleExecute() {
   try {

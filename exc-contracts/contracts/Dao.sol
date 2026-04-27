@@ -72,7 +72,7 @@ contract Dao {
         newProposal.target = _target;
         newProposal.value = _value;
         newProposal.callData = _callData;
-        newProposal.status = 0;//待开始
+        newProposal.status = 0;//提案已创建，等待投票中
 
         // 在单独的 mapping 中记录提案人
         proposalProposers[proposalId] = msg.sender;
@@ -101,15 +101,34 @@ contract Dao {
         emit VoteCast(_proposalId, msg.sender, _support, weight);
     }
 
+    /**
+     * 将提案加入公示期队列
+     */
     function queue(uint256 _proposalId) external {
         Proposal storage p = proposals[_proposalId];
+
+        // 检查投票是否已结束
         require(block.timestamp >= p.deadline, "Voting not finished");
-        require(p.status == 2, "Proposal not succeeded");
         require(p.status != 4, "Already queued");
+        require(p.status != 5, "Already executed");
+        require(p.status != 6, "Already cancelled");
+
+        // 内部检查投票结果
+        if (p.status == 0 || p.status == 1) {
+            // 投票中状态，需要先检查投票结果
+            if (p.forVotes > p.againstVotes) {
+                p.status = 2; // 提案通过，等待加入公示期
+            } else {
+                p.status = 3; // 提案失败
+                revert("Proposal rejected");
+            }
+        }
+
+        // 检查提案是否通过（status == 2）
+        require(p.status == 2, "Proposal not succeeded");
 
         uint256 eta = block.timestamp + timelock.minDelay();
         p.eta = eta;
-
 
         // 命令 Timelock 将此交易排队（eta 在 queueTransaction 内部计算）
         bytes32 txId = timelock.queueTransaction(p.target, p.value, p.callData);
@@ -117,10 +136,11 @@ contract Dao {
 
         // 通过查询获取 eta 值
         p.eta = timelock.timestamps(txId);
-        p.status = 4;//已加入队列
+        p.status = 4; // 公示期中
 
         emit ProposalQueued(_proposalId, p.eta);
     }
+
 
     function execute(uint256 _proposalId) external payable {
         Proposal storage p = proposals[_proposalId];
@@ -130,7 +150,7 @@ contract Dao {
         // 命令Timelock执行此交易
         timelock.executeTransaction{value: p.value}(p.target, p.value, p.callData, p.eta);
 
-        p.status = 5;//已执行
+        p.status = 5;//提案已执行
 
         emit ProposalExecuted(_proposalId);
     }
@@ -138,7 +158,7 @@ contract Dao {
     function cancel(uint256 _proposalId) external {
         Proposal storage p = proposals[_proposalId];
 
-        //核心修改 ：通过单独的 mapping 来验证权限
+        //通过单独的 mapping 来验证权限
         require(msg.sender == proposalProposers[_proposalId], "Only proposer can cancel");
 
         // 只能在特定状态下取消
@@ -149,7 +169,7 @@ contract Dao {
             "Can only cancel pending or active proposals"
         );
 
-        p.status = 6;//已取消
+        p.status = 6;//提案已取消
         emit ProposalCanceled(_proposalId);
     }
 
@@ -168,9 +188,9 @@ contract Dao {
         require(p.status == 0 || p.status == 1, "Invalid state");
 
         if (p.forVotes > p.againstVotes) {
-            p.status = 2;//投票通过
+            p.status = 2;//提案通过，等待加入公示期
         } else {
-            p.status = 3;//投票失败
+            p.status = 3;//提案失败
         }
     }
 

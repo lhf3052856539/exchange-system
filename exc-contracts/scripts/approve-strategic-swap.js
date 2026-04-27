@@ -36,6 +36,7 @@ async function main() {
 
     // 从合约读取规定的 USDT 数量
     const usdtAmount = await strategicSwap.usdtAmount();
+    //const usdtAmount = 5000000000;
     console.log("\n📋 StrategicSwap 合约规定的 USDT 数量:", hre.ethers.formatUnits(usdtAmount, 6), "USDT");
 
     const approveAmount = usdtAmount;

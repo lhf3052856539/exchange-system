@@ -126,9 +126,14 @@ async function main() {
 
     //5. 部署其他辅助合约
     console.log("\n12. Deploying Airdrop contract...");
-    const merkleRoot = "0xf4aa42cb1bd92c6801235dda3a3ba1e96e719e953dd63f2e0d3e4ee9a9a57572";
+    const merkleRoot = "0x644932194348b4219f7d47b00668f7f91ee537e4e4dc632aebc7edbcfaba8f8c";
     const Airdrop = await ethers.getContractFactory("Airdrop");
-    const airdrop = await Airdrop.deploy(merkleRoot, await exth.getAddress(), await timelock.getAddress());
+    const airdrop = await Airdrop.deploy(
+        merkleRoot,
+        await exth.getAddress(),
+        await exchange.getAddress(),
+        await timelock.getAddress()
+    );
     await airdrop.waitForDeployment();
     console.log("-> Airdrop deployed to:", await airdrop.getAddress());
 
@@ -136,7 +141,7 @@ async function main() {
     const StrategicSwap = await ethers.getContractFactory("StrategicSwap");
     const strategicSwap = await StrategicSwap.deploy(
         await exth.getAddress(), await usdt.getAddress(), "0x438388eB3158a7417b2362A52A17b442aE8c2FB2",
-        await treasure.getAddress(), ethers.parseUnits("50000000000", 6), ethers.parseUnits("50000000000", 6),
+        await treasure.getAddress(), ethers.parseUnits("5000000000", 6), ethers.parseUnits("5000000000", 6),
         await timelock.getAddress()
     );
     await strategicSwap.waitForDeployment();
@@ -148,12 +153,69 @@ async function main() {
     await (await exth.mint(await treasure.getAddress(), mintAmount)).wait();
     console.log("-> Minted 150B EXTH tokens to Treasure.");
 
-    console.log("\n15. Distributing initial EXTH for testing...");
-    const withdrawAmount = ethers.parseUnits("900", 6);
-    for (const addr of committeeMembers.slice(0, 2)) { // 使用委员会地址作为测试地址
-        await (await treasure.withdrawERC20(await exth.getAddress(), addr, withdrawAmount)).wait();
-        console.log(`-> Withdrawn 900 EXTH to ${addr}`);
+    console.log("\n15. Initializing seed users...");
+    const seedAmount = ethers.parseUnits("900", 6);
+
+    // 定义种子用户地址和对应的私钥变量名
+    const seedUsersConfig = [
+        {
+            addr: "0x31DC8e70A43f761a75229484975E416Ea53dcDC6",
+            keyEnv: "SEED_USER_1_PRIVATE_KEY"
+        },
+        {
+            addr: "0x652A5bdA0138EfeC56EDAA0458428b7e604B7849",
+            keyEnv: "SEED_USER_2_PRIVATE_KEY"
+        }
+    ];
+
+    for (const config of seedUsersConfig) {
+        console.log(`\n-> Processing seed user: ${config.addr}`);
+
+        let signer;
+        // 尝试从环境变量获取私钥
+        if (process.env[config.keyEnv]) {
+            signer = new ethers.Wallet(process.env[config.keyEnv], ethers.provider);
+            console.log(`   Using private key from env for ${config.addr}`);
+        } else {
+            // 如果没有配置私钥，且是本地网络，则使用 impersonate
+            if (hre.network.name === "localhost" || hre.network.name === "hardhat") {
+                signer = await ethers.getImpersonatedSigner(config.addr);
+                console.log(`   Using impersonated signer for local network`);
+            } else {
+                // 如果是测试网且没私钥，只能用 deployer 代注册（前提是合约支持 registerUserFor）
+                console.log(`   ⚠ No private key found. Attempting admin registration...`);
+                signer = deployer;
+            }
+        }
+
+        // 注册账户
+        const userInfoBefore = await exchange.users(config.addr);
+        const isRegistered = userInfoBefore.newUserTradeCount > 0 || userInfoBefore.userType !== 0;
+
+        if (!isRegistered) {
+            console.log(`   Registering user in Exchange...`);
+            // 如果 signer 是 deployer，确保合约里有 registerUserFor 或者 registerUser(address)
+            const tx = await exchange.connect(signer).registerUser(config.addr, { gasLimit: 300000 });
+            await tx.wait();
+            console.log(`   ✓ User registered successfully`);
+        } else {
+            console.log(`   ℹ User already registered, skipping`);
+        }
+
+        // 转账 EXTH
+        console.log(`   Transferring 900 EXTH to user...`);
+        const transferTx = await treasure.connect(deployer).withdrawERC20(await exth.getAddress(), config.addr, seedAmount);
+        await transferTx.wait();
+        console.log(`   ✓ Transferred 900 EXTH`);
     }
+
+    // 批量设置为种子用户
+    console.log(`\n   Setting users as SEED type in Exchange...`);
+    const seedAddrs = seedUsersConfig.map(u => u.addr);
+    const initSeedTx = await exchange.connect(deployer).initSeedUsers(seedAddrs);
+    await initSeedTx.wait();
+    console.log(`   ✓ All seed users initialized successfully`);
+
 
     //7. 移交所有权, 完成去中心化
     console.log("\n16. Transferring ownership of all contracts to Timelock...");

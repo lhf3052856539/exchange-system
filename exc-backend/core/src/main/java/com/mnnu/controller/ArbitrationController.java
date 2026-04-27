@@ -14,6 +14,7 @@ import com.mnnu.service.MultiSigWalletService;
 import com.mnnu.vo.JsonVO;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.web3j.protocol.Web3j;
@@ -28,14 +29,9 @@ import java.util.stream.Collectors;
 @Slf4j
 @RestController
 @RequestMapping("/apis/arbitration")
-@RequiredArgsConstructor
 public class ArbitrationController {
-
-    private final MultiSigWalletService multiSigWalletService;
-
-    private final DisputeRecordMapper disputeMapper;
-    private final TradeMapper tradeMapper;
-    private final Web3j web3j;
+    @Autowired
+    private MultiSigWalletService multiSigWalletService;
 
     /**
      * 创建仲裁提案

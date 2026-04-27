@@ -8,15 +8,15 @@ import com.mnnu.service.UserService;
 import com.mnnu.vo.JsonVO;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
 
 @Slf4j
 @RestController
 @RequestMapping("/apis/user")
-@RequiredArgsConstructor
 public class UserController implements UserApi {
-
-    private final UserService userService;
+    @Autowired
+    private UserService userService;
 
     @Override
     public JsonVO<String> login(@RequestParam String address, @RequestParam String signature) {
@@ -29,16 +29,6 @@ public class UserController implements UserApi {
         }
     }
 
-    @Override
-    public JsonVO<UserDTO> register(@RequestParam String address) {
-        try {
-            UserDTO user = userService.register(address);
-            return JsonVO.success(user);
-        } catch (Exception e) {
-            log.error("Register failed", e);
-            return JsonVO.error(e.getMessage());
-        }
-    }
 
     @Override
     public JsonVO<UserDTO> getUserInfo(@CurrentUser String address) {
@@ -62,14 +52,4 @@ public class UserController implements UserApi {
         }
     }
 
-    @Override
-    public JsonVO<UserDTO> updateUserType(@PathVariable String address) {
-        try {
-            UserDTO user = userService.updateUserType(address);
-            return JsonVO.success(user);
-        } catch (Exception e) {
-            log.error("Update user type failed", e);
-            return JsonVO.error(e.getMessage());
-        }
-    }
 }

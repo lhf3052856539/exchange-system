@@ -11,13 +11,12 @@ public class CommitteeMemberEntity {
     private Long id;
 
     private String address;
-    private String name;
 
     @TableField("is_active")
     private Boolean isActive;
 
     private LocalDateTime joinTime;
     private LocalDateTime leaveTime;
-    private LocalDateTime createTime;
+
     private LocalDateTime updateTime;
 }

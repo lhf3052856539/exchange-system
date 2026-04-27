@@ -9,6 +9,7 @@ import com.mnnu.component.handler.CustomWebSocketHandler;
 import com.mnnu.service.NotificationService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Service;
 
@@ -20,13 +21,10 @@ import java.util.concurrent.TimeUnit;
 
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class WebSocketService {
 
-
-    private final ObjectMapper objectMapper;
-    private final RedisTemplate<String, String> redisTemplate;
-    private final NotificationService notificationService;
+    @Autowired
+    private ObjectMapper objectMapper;
 
     /**
      * 用户上线处理

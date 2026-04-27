@@ -4,6 +4,7 @@ import com.mnnu.config.CurrentUser;
 import com.mnnu.service.BlockchainService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -17,10 +18,9 @@ import java.util.Map;
 @Slf4j
 @RestController
 @RequestMapping("/apis/blockchain")
-@RequiredArgsConstructor
 public class BlockchainController {
-
-    private final BlockchainService blockchainService;
+    @Autowired
+    private BlockchainService blockchainService;
 
     /**
      * 检查用户对 Exchange 合约的 EXTH 授权额度

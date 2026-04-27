@@ -75,7 +75,7 @@
           </template>
 
           <el-table :data="paginatedPendingDisputes" style="width: 100%">
-            <el-table-column prop="tradeId" label="交易 ID" width="120" />
+            <el-table-column prop="chainTradeId" label="交易 ID" width="120" />
             <el-table-column prop="initiator" label="发起方" width="200">
               <template #default="{ row }">
                 {{ row.initiator }}
@@ -142,35 +142,35 @@
           <el-table :data="paginatedPendingProposals" style="width: 100%">
             <el-table-column prop="proposalId" label="提案 ID" width="80">
               <template #default="{ row }">
-                {{ row.proposalId || row.id }}
+                {{ row.proposalId || row.id || '-' }}
               </template>
             </el-table-column>
-            <el-table-column prop="tradeId" label="交易 ID" width="120" />
+            <el-table-column prop="chainTradeId" label="交易 ID" width="120" />
             <el-table-column prop="accused" label="被指控方" width="200">
               <template #default="{ row }">
-                {{ row.accusedParty }}
+                {{ row.accused || '-' }}
               </template>
             </el-table-column>
             <el-table-column prop="initiator" label="受害方" width="200">
               <template #default="{ row }">
-                {{ row.victimParty }}
+                {{ row.initiator || '-' }}
               </template>
             </el-table-column>
-            <el-table-column prop="compensationAmount" label="赔偿金额 (USDT)" width="120">
+            <el-table-column prop="compensationAmount" label="赔偿金额 (USDT)" width="150">
               <template #default="{ row }">
                 {{ formatAmount(row.compensationAmount) }}
               </template>
             </el-table-column>
-            <el-table-column prop="voteCount" label="赞成票" width="80">
+            <el-table-column prop="voteCount" label="赞成票" width="100">
               <template #default="{ row }">
                 <el-tag :type="row.voteCount >= 2 ? 'success' : 'warning'">
-                  {{ row.voteCount }}/2
+                  {{ row.voteCount || 0 }}/2
                 </el-tag>
               </template>
             </el-table-column>
-            <el-table-column prop="evidence" label="仲裁原因" min-width="200">
+            <el-table-column prop="reason" label="仲裁原因" min-width="200">
               <template #default="{ row }">
-                {{ row.arbitrationReason || '无' }}
+                {{ formatReason(row.reason) }}
               </template>
             </el-table-column>
             <el-table-column label="操作" width="200" fixed="right">
@@ -178,6 +178,7 @@
                 <el-button
                     type="success"
                     size="small"
+                    :disabled="!scope.row.proposalId || scope.row.proposalId === '-'"
                     :loading="votingId === scope.row.proposalId && votingSupport"
                     @click="handleVote(scope.row.proposalId, true)"
                 >
@@ -186,6 +187,7 @@
                 <el-button
                     type="danger"
                     size="small"
+                    :disabled="!scope.row.proposalId || scope.row.proposalId === '-'"
                     :loading="votingId === scope.row.proposalId && !votingSupport"
                     @click="handleVote(scope.row.proposalId, false)"
                 >
@@ -227,43 +229,50 @@
           </template>
 
           <el-table :data="paginatedHistoryProposals" style="width: 100%">
-            <el-table-column prop="tradeId" label="交易 ID" width="120" />
-            <el-table-column prop="accusedParty" label="被指控方" width="140">
+            <el-table-column prop="chainTradeId" label="交易 ID" width="120" />
+            <el-table-column label="被指控方" width="140">
               <template #default="{ row }">
-                {{ row.accusedParty }}
+                {{ row.accused }}
               </template>
             </el-table-column>
-            <el-table-column prop="victimParty" label="受害方" width="140">
+            <el-table-column label="发起方" width="140">
               <template #default="{ row }">
-                {{ row.victimParty }}
+                {{ row.initiator }}
               </template>
             </el-table-column>
-            <el-table-column prop="compensationAmount" label="赔偿金额" width="120">
+            <el-table-column label="赔偿金额" width="120">
               <template #default="{ row }">
                 {{ formatAmount(row.compensationAmount) }}
               </template>
             </el-table-column>
-            <el-table-column prop="result" label="结果" width="100">
+            <el-table-column label="投票情况" width="120">
               <template #default="{ row }">
-                <el-tag v-if="row.executed" type="success">已执行</el-tag>
-                <el-tag v-else-if="row.rejected" type="danger">已驳回</el-tag>
-                <el-tag v-else type="info">未知</el-tag>
+                <span class="text-green-600">{{ row.voteCount }}</span> /
+                <span class="text-red-600">{{ row.rejectCount }}</span>
               </template>
             </el-table-column>
-            <el-table-column prop="createdAt" label="时间" width="180">
+            <el-table-column label="状态" width="100">
               <template #default="{ row }">
-                {{ formatTimestamp(row.createdAt) }}
+                <el-tag
+                    :type="row.voteCount >= 2 ? 'success' : (row.rejectCount >= 2 ? 'danger' : 'info')"
+                    size="small"
+                >
+                  {{ row.voteCount >= 2 ? '已通过' : (row.rejectCount >= 2 ? '已拒绝' : '待投票') }}
+                </el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="80">
+            <el-table-column label="操作" width="100" fixed="right">
               <template #default="{ row }">
                 <el-button
-                    type="info"
+                    v-if="row.proposalId"
                     size="small"
+                    type="primary"
+                    link
                     @click="viewProposalDetail(row)"
                 >
                   详情
                 </el-button>
+                <span v-else class="text-gray-400 text-xs">无ID</span>
               </template>
             </el-table-column>
           </el-table>
@@ -532,65 +541,97 @@ async function loadData() {
 // 加载仲裁历史
 async function loadHistory() {
   try {
-    const historyRes = await getHistoryProposals()
-    historyProposals.value = historyRes.data || []
-  } catch (err) {
-    console.error('Failed to load history:', err)
+    console.log('📜 请求仲裁历史列表...')
+    const res = await getHistoryProposals()
+    console.log('✅ 仲裁历史响应:', res)
+
+    // 适配后端字段：accused, initiator, proposalStatus
+    historyProposals.value = (res.data || []).map(item => ({
+      ...item,
+      // 确保关键字段存在
+      chainTradeId: item.chainTradeId || '-',
+      proposalId: item.proposalId || '-',
+      accused: item.accused || item.accusedParty || '-',
+      initiator: item.initiator || item.victimParty || '-',
+      proposalStatus: item.proposalStatus ?? item.status ?? 0,
+      voteCount: item.voteCount || 0,
+      rejectCount: item.rejectCount || 0,
+      compensationAmount: item.compensationAmount || 0,
+      deadline: item.deadline || null,
+      createTime: item.createTime || null
+    }))
+
+    console.log('📊 仲裁历史数量:', historyProposals.value.length)
+  } catch (error) {
+    console.error('❌ 加载仲裁历史失败:', error)
+
+    // 降级方案：尝试从待处理提案中获取已处理的记录
+    try {
+      console.log('⚠️ 尝试从本地缓存获取历史数据...')
+      // 如果后端完全不可用，显示空列表并提示用户
+      historyProposals.value = []
+      ElMessage.warning('仲裁历史暂时无法加载，请稍后重试')
+    } catch (fallbackError) {
+      console.error('降级方案也失败了:', fallbackError)
+      historyProposals.value = []
+    }
   }
 }
 
 // 加载待处理争议
-const loadPendingDisputes = async () => {
+async function loadPendingDisputes() {
   try {
     console.log('📋 请求待处理争议列表...')
     const res = await getPendingDisputes()
-    console.log('待处理争议响应:', res)
+    console.log('✅ 待处理争议响应:', res)
 
-    // ✅ 兼容两种返回格式：res.data 或 res
-    let disputeList = []
-    if (Array.isArray(res)) {
-      disputeList = res
-    } else if (res && Array.isArray(res.data)) {
-      disputeList = res.data
-    } else {
-      console.warn('⚠️ 待处理争议数据格式异常:', res)
-      disputeList = []
-    }
+    // 适配后端字段
+    pendingDisputes.value = (res.data || []).map(item => ({
+      ...item,
+      // 确保关键字段存在
+      chainTradeId: item.chainTradeId || '-',
+      initiator: item.initiator || '-',
+      accused: item.accused || '-',
+      reason: item.reason || '暂无描述',
+      evidence: item.evidence || 'N/A',
+      createTime: item.createTime || null,
+      proposalStatus: item.proposalStatus ?? 0
+    }))
 
-    pendingDisputes.value = disputeList
-    console.log('✅ 待处理争议数量:', pendingDisputes.value.length)
+    console.log('📊 待处理争议数量:', pendingDisputes.value.length)
   } catch (error) {
-    console.error('Failed to load pending disputes:', error)
+    console.error('❌ 加载待处理争议失败:', error)
+    ElMessage.error('加载待处理争议失败：' + (error.message || '未知错误'))
     pendingDisputes.value = []
   }
 }
 
-
-// 加载待处理提案
 async function loadPendingProposals() {
   try {
-    console.log('📋 请求待处理提案列表...')
-    const res = await request({
-      url: '/arbitration/proposal/pending',
-      method: 'get'
-    })
-
+    console.log('📤 请求待处理提案列表...')
+    const res = await getPendingProposals()
     console.log('✅ 待处理提案响应:', res)
-    console.log('📊 待处理提案 data:', res.data)
-    console.log('🔍 第一个提案的完整数据:', res.data[0])
 
-    if (res.data && res.data.length > 0) {
-      pendingProposals.value = res.data
-      console.log('⏰ 第一个提案的 deadline:', res.data[0]?.deadline)
-      console.log('🆔 第一个提案的 proposalId:', res.data[0]?.proposalId)
-      console.log('🔢 第一个提案的 id:', res.data[0]?.id)
-    } else {
-      pendingProposals.value = []
-    }
-    console.log(`📝 待处理提案数量：${pendingProposals.value.length}`)
+    // 适配后端字段
+    pendingProposals.value = (res.data || []).map(item => ({
+      ...item,
+      chainTradeId: item.chainTradeId || '-',
+      proposalId: item.proposalId || '-',
+      initiator: item.initiator || '-',
+      accused: item.accused || '-',
+      compensationAmount: item.compensationAmount || 0,
+      voteCount: item.voteCount || 0,
+      rejectCount: item.rejectCount || 0,
+      deadline: item.deadline || null,
+      proposalStatus: item.proposalStatus ?? item.status ?? 0,
+      createTime: item.createTime || null
+    }))
+
+    console.log('📊 待处理提案数量:', pendingProposals.value.length)
   } catch (error) {
-    console.error('❌ 获取待处理提案失败:', error)
-    ElMessage.error('获取待处理提案失败')
+    console.error('❌ 加载待处理提案失败:', error)
+    ElMessage.error('加载待处理提案失败：' + (error.message || '未知错误'))
+    pendingProposals.value = []
   }
 }
 
@@ -618,7 +659,7 @@ async function handleCreateProposal(dispute) {
     creatingProposalTradeId.value = dispute.tradeId
 
     console.log('📤 创建仲裁提案（不自动投票）:', {
-      tradeId: dispute.tradeId,
+      chainTradeId: dispute.chainTradeId,
       accusedParty: dispute.accused,
       victimParty: dispute.initiator,
       compensationAmount,
@@ -628,7 +669,7 @@ async function handleCreateProposal(dispute) {
 
     console.log('🔗 调用后端 API 创建提案...')
     const txHash = await createProposal({
-      tradeId: dispute.tradeId,
+      chainTradeId: dispute.chainTradeId,
       accusedParty: dispute.accused,
       victimParty: dispute.initiator,
       compensationAmount,
@@ -704,7 +745,6 @@ async function confirmVote() {
   }
 }
 
-// 查看提案详情
 // 查看提案详情
 function viewProposalDetail(row) {
   console.log('📋 查看提案详情，row:', row)

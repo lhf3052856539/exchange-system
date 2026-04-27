@@ -20,4 +20,9 @@ public interface AirdropService {
 
 
     Map<String, Object> getUserClaimInfo(String address);
+
+    Boolean hasClaimed(String address);
+
+    @Transactional
+    String claimOnChain(String address, BigInteger amount, List<String> merkleProof);
 }

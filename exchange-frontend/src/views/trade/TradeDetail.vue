@@ -41,7 +41,7 @@
           <el-descriptions-item label="交易对">
             {{ trade.fromCurrency }}/{{ trade.toCurrency }}
           </el-descriptions-item>
-          <el-descriptions-item label="金额 (USD)">
+          <el-descriptions-item label="金额 (UT)">
             {{ trade.amount }}
           </el-descriptions-item>
           <el-descriptions-item label="匹配汇率">            1 {{ trade.fromCurrency }} = {{ trade.exchangeRate }} {{ trade.toCurrency }}
@@ -52,7 +52,7 @@
           </el-descriptions-item>
           <!-- 添加授权信息显示 -->
           <el-descriptions-item
-              v-if="isPartyA && getStatus === TRADE_STATUS.PARTY_B_CONFIRMED"
+              v-if="getStatus === TRADE_STATUS.MATCHED || getStatus === TRADE_STATUS.CONFIRMING_A || getStatus === TRADE_STATUS.PARTY_A_CONFIRMED || getStatus === TRADE_STATUS.CONFIRMING_B || getStatus === TRADE_STATUS.PARTY_B_CONFIRMED"
               label="授权状态"
           >
             <el-tag v-if="needApprove" type="warning">未授权</el-tag>
@@ -76,9 +76,9 @@
               <h3>甲方 (Party A)</h3>
               <p><strong>地址:</strong> <span style="font-family: 'Courier New', monospace; font-size: 13px; word-break: break-all;">{{ trade.partyA }}</span></p>
               <p><strong>应发送金额:</strong> {{ formatAmount(trade.amountA) }} {{ trade.fromCurrency }}</p>
-              <p><strong>转账哈希:</strong> {{ trade.partyATxHash || '待确认' }}</p>
+              <p><strong>转账哈希:</strong> {{ trade.txHashA || '待确认' }}</p>
               <p><strong>状态:</strong>
-                <el-tag v-if="trade.partyATxHash" type="success">已转账</el-tag>
+                <el-tag v-if="trade.txHashA" type="success">已转账</el-tag>
                 <el-tag v-else type="warning">待转账</el-tag>
               </p>
             </div>
@@ -276,7 +276,11 @@
         <p><strong>赞成票:</strong> {{ arbitrationInfo.yesVotes }} / 2</p>
         <p><strong>反对票:</strong> {{ arbitrationInfo.noVotes }}</p>
         <p><strong>截止时间:</strong> {{ formatTimestamp(arbitrationInfo.deadline) }}</p>
-        <p><strong>状态:</strong> {{ arbitrationInfo.status }}</p>
+        <p><strong>状态:</strong>
+          <el-tag :type="ARBITRATION_STATUS_TAG[arbitrationInfo.status] || 'info'">
+            {{ ARBITRATION_STATUS_TEXT[arbitrationInfo.status] || arbitrationInfo.status || '未知状态' }}
+          </el-tag>
+        </p>
       </el-card>
     </el-dialog>
 
@@ -292,6 +296,24 @@ import { useWalletStore } from '@/stores'
 import { useTrade } from '@/composables/useTrade'
 import { TRADE_STATUS, TRADE_STATUS_CODE } from '@/config/constants'
 import * as ethers from 'ethers'
+
+// 仲裁状态映射
+const ARBITRATION_STATUS_TEXT = {
+  0: '无争议',
+  1: '争议处理中',
+  2: '争议请求已执行',
+  3: '争议请求已驳回',
+  4: '争议已过期'
+}
+
+const ARBITRATION_STATUS_TAG = {
+  0: 'info',
+  1: 'warning',
+  2: 'success',
+  3: 'danger',
+  4: 'info'
+}
+
 
 
 const router = useRouter()
@@ -320,20 +342,17 @@ const trade = computed(() => {
 const getStatus = computed(() => {
   if (!trade.value) return null
 
-  // 如果状态是数字，转换为对应的字符串
   if (typeof trade.value.status === 'number') {
     const statusMap = {
-      0: TRADE_STATUS.PENDING,
-      1: TRADE_STATUS.MATCHED,
-      2: TRADE_STATUS.CONFIRMING_A,
-      3: TRADE_STATUS.PARTY_A_CONFIRMED,
-      4: TRADE_STATUS.CONFIRMING_B,
-      5: TRADE_STATUS.PARTY_B_CONFIRMED,
-      6: 'PENDING_CHAIN_CONFIRM',  // 待链上确认
-      7: TRADE_STATUS.COMPLETED,   // 已完成
-      8: TRADE_STATUS.DISPUTED,    // 争议中
-      9: TRADE_STATUS.FAILED,      // 失败
-      10: TRADE_STATUS.CANCELLED   // 已取消
+      0: TRADE_STATUS.MATCHED,
+      1: TRADE_STATUS.PARTY_A_CONFIRMED,
+      2: TRADE_STATUS.PARTY_B_CONFIRMED,
+      3: TRADE_STATUS.COMPLETED,
+      4: TRADE_STATUS.CANCELLED,
+      5: TRADE_STATUS.DISPUTED,
+      6: TRADE_STATUS.FAILED,
+      7: TRADE_STATUS.EXPIRED,
+      9: TRADE_STATUS.PENDING_CHAIN_CONFIRM
     }
     return statusMap[trade.value.status] || trade.value.status
   }
@@ -408,22 +427,19 @@ const canConfirmTransfer = computed(() => {
 
 
 const canConfirmReceipt = computed(() => {
-  // 乙方在 CONFIRMING_A 状态下确认收款（等待甲方转账）
-  if (getStatus.value === TRADE_STATUS.CONFIRMING_A && !isPartyA.value) {
-    return true
-  }
-  // 乙方在 MATCHED 状态下确认收款（等待甲方转账）
+  // 等待甲方转账
   if (getStatus.value === TRADE_STATUS.MATCHED && !isPartyA.value) {
     return true
   }
-  // 甲方在 CONFIRMING_B 状态下确认收款（等待乙方转账）
-  if (getStatus.value === TRADE_STATUS.CONFIRMING_B && isPartyA.value) {
-    return true
-  }
-  // 乙方在 PARTY_A_CONFIRMED 状态下确认收款（等待乙方确认）
+  // 等待乙方转账
   if (getStatus.value === TRADE_STATUS.PARTY_A_CONFIRMED && !isPartyA.value) {
     return true
   }
+  // 等待甲方最终确认
+  if (getStatus.value === TRADE_STATUS.PARTY_B_CONFIRMED && isPartyA.value) {
+    return true
+  }
+
   return false
 })
 
@@ -493,20 +509,22 @@ async function showArbitrationProgress() {
       yesVotes: 1,
       noVotes: 0,
       deadline: Date.now() / 1000 + 86400 * 7,
-      status: '投票中',
+      status: 1,
       executed: false,
       rejected: false
     }
 
     // 设置进度步骤
-    if (arbitrationInfo.value.executed) {
+    if (arbitrationInfo.value.status === 2) {
       arbitrationStep.value = 4
-    } else if (arbitrationInfo.value.rejected) {
+    } else if (arbitrationInfo.value.status === 3) {
       arbitrationStep.value = 2
-    } else if (arbitrationInfo.value.yesVotes >= 2) {
-      arbitrationStep.value = 3
+    } else if (arbitrationInfo.value.status === 1) {
+      arbitrationStep.value = 2
+    } else if (arbitrationInfo.value.status === 0) {
+      arbitrationStep.value = 0
     } else {
-      arbitrationStep.value = 2
+      arbitrationStep.value = 3
     }
 
     arbitrationDialogVisible.value = true
@@ -530,12 +548,20 @@ function formatAmount(amount) {
 }
 
 function handleConfirmTransfer() {
+  if (needApprove.value) {
+    ElMessage.warning('请先授权 EXTH 手续费')
+    return
+  }
   isConfirmingTransfer.value = true
   confirmForm.value.txHash = ''
   confirmDialogVisible.value = true
 }
 
 function handleConfirmReceipt() {
+  if (needApprove.value) {
+    ElMessage.warning('请先授权 EXTH 手续费')
+    return
+  }
   isConfirmingTransfer.value = false
   confirmForm.value.txHash = ''
   confirmDialogVisible.value = true
@@ -546,22 +572,152 @@ async function handleFinalConfirm() {
     await ElMessageBox.confirm(
         '请确认您已收到乙方的转账，确认后将完成整个交易。',
         '最终确认',
-        {
-          confirmButtonText: '确认',
-          cancelButtonText: '取消',
-          type: 'warning'
-        }
+        { confirmButtonText: '确认', cancelButtonText: '取消', type: 'warning' }
     )
+
+    console.log('🔍 Final confirm check:', {
+      chainTradeId: trade.value.chainTradeId,
+      status: trade.value.status,
+      getStatus: getStatus.value,
+      isPartyA: isPartyA.value
+    })
+
+    if (!trade.value.chainTradeId) {
+      ElMessage.error('链上交易 ID 不存在')
+      return
+    }
+
+    if (trade.value.status !== 2) {
+      ElMessage.error(`当前状态不允许完成交易，当前状态: ${trade.value.status}`)
+      return
+    }
 
     confirming.value = true
     try {
-      // 调用 store 中的最终确认方法
-      await tradeStore.finalConfirmPartyA(trade.value.tradeId)
-      await loadTradeDetail() // ✅ 已有刷新
-      ElMessage.success('交易已完成')
+      const { ethers } = await import('ethers')
+      const provider = new ethers.BrowserProvider(window.ethereum)
+      const signer = await provider.getSigner()
+
+      const exthABI = [
+        "function allowance(address owner, address spender) view returns (uint256)",
+        "function balanceOf(address account) view returns (uint256)",
+        "function decimals() view returns (uint8)"
+      ]
+
+      const exchangeABI = [
+        "function completeTrade(uint256 tradeId) external returns (bool)",
+        "function treasure() view returns (address)",
+        "function tradePairs(uint256) view returns (tuple(address partyA, address partyB, uint256 amount, uint256 exthReward, uint256 feeAmount, uint256 createTime, uint256 completeTime, uint8 state, address disputedParty))"
+      ]
+
+      const exchangeAddress = import.meta.env.VITE_EXCHANGE_CONTRACT_ADDRESS
+      const exthAddress = import.meta.env.VITE_EXTH_CONTRACT_ADDRESS
+
+      const exthContract = new ethers.Contract(exthAddress, exthABI, signer)
+      const exchangeContract = new ethers.Contract(exchangeAddress, exchangeABI, signer)
+
+      const chainTradeId = trade.value.chainTradeId
+
+      console.log(' Checking allowances before completeTrade...')
+
+      const partyAAllowance = await exthContract.allowance(trade.value.partyA, exchangeAddress)
+      const partyBAllowance = await exthContract.allowance(trade.value.partyB, exchangeAddress)
+
+      console.log(' Allowances:', {
+        partyA: trade.value.partyA,
+        partyAAllowance: partyAAllowance.toString(),
+        partyB: trade.value.partyB,
+        partyBAllowance: partyBAllowance.toString()
+      })
+
+      // 使用 trade.value.feeAmount 替代硬编码的 50000
+      const feeAmountInWei = ethers.parseUnits((trade.value.feeAmount || 0.01).toString(), 6)
+
+      if (partyAAllowance < feeAmountInWei) {
+        ElMessage.warning('甲方未授权 EXTH 手续费，请先授权')
+        return
+      }
+
+      if (partyBAllowance < feeAmountInWei) {
+        ElMessage.warning('乙方未授权 EXTH 手续费，请先授权')
+        return
+      }
+
+      console.log(' Checking treasure contract and rewards...')
+      const treasureAddress = await exchangeContract.treasure()
+      console.log(' Treasure address:', treasureAddress)
+
+      if (treasureAddress === ethers.ZeroAddress) {
+        ElMessage.error('金库合约未设置，请联系管理员')
+        return
+      }
+
+      const tradeInfo = await exchangeContract.tradePairs(chainTradeId)
+      console.log(' Trade info from chain:', {
+        partyA: tradeInfo.partyA,
+        partyB: tradeInfo.partyB,
+        amount: tradeInfo.amount.toString(),
+        exthReward: tradeInfo.exthReward.toString(),
+        feeAmount: tradeInfo.feeAmount.toString(),
+        state: tradeInfo.state
+      })
+
+      // 修改：直接从 EXTH 合约查询 Treasure 的余额，而不是调用不存在的 getERC20Balance
+      const treasureExthBalance = await exthContract.balanceOf(treasureAddress)
+      console.log(' Treasure EXTH balance:', treasureExthBalance.toString())
+
+      const totalRewardNeeded = tradeInfo.exthReward * BigInt(2)
+      console.log(' Total reward needed (both parties):', totalRewardNeeded.toString())
+
+      if (treasureExthBalance < totalRewardNeeded) {
+        ElMessage.error(`金库 EXTH 余额不足，需要 ${ethers.formatUnits(totalRewardNeeded, 6)} EXTH，当前余额 ${ethers.formatUnits(treasureExthBalance, 6)} EXTH`)
+        return
+      }
+
+      console.log(' All checks passed, calling completeTrade with chainTradeId:', chainTradeId)
+
+      const tx = await exchangeContract.completeTrade(chainTradeId)
+
+      console.log('Transaction sent:', tx.hash)
+      ElMessage.info('等待交易确认中...')
+
+      const receipt = await tx.wait()
+
+      console.log('Complete trade confirmed:', receipt.transactionHash)
+      ElMessage.success('交易已完成！')
+
+      await loadTradeDetail()
     } catch (error) {
-      console.error('Final confirm failed:', error)
-      ElMessage.error('操作失败：' + (error.message || '未知错误'))
+      console.error('Complete trade failed:', error)
+
+      let errorMsg = '操作失败'
+
+      // 新增：解析 0x3ee5aeb5 错误码
+      if (error.data && error.data.data === '0x3ee5aeb5') {
+        // 0x3ee5aeb5 对应 "Invalid state: waiting for confirmations or disputed"
+        errorMsg = '交易状态不正确，请确认双方都已完成链上确认'
+
+        // 自动刷新链上状态
+        try {
+          const exchangeContract = new ethers.Contract(
+              import.meta.env.VITE_EXCHANGE_CONTRACT_ADDRESS,
+              ["function tradePairs(uint256) view returns (tuple(address, address, uint256, uint256, uint256, uint256, uint256, uint8, address))"],
+              ethers.provider
+          );
+          const chainTradeInfo = await exchangeContract.tradePairs(trade.value.chainTradeId);
+          console.log("链上实际状态:", chainTradeInfo.state);
+        } catch (e) {
+          console.error("Failed to fetch chain state:", e);
+        }
+      } else if (error.message && error.message.includes('Treasure not set')) {
+        errorMsg = '金库合约未设置，请联系管理员'
+      } else if (error.reason) {
+        errorMsg = error.reason
+      } else if (error.message) {
+        errorMsg = error.message
+      }
+
+      ElMessage.error(errorMsg)
     } finally {
       confirming.value = false
     }
@@ -593,21 +749,80 @@ async function submitConfirm() {
 
   confirming.value = true
   try {
-    await confirmTrade(
-        trade.value.tradeId,
-        confirmForm.value.txHash,
-        isPartyA.value
+    // 构建 URL 参数
+    const params = new URLSearchParams({
+      tradeId: trade.value.tradeId,
+      txHash: confirmForm.value.txHash
+    })
+
+    const confirmUrl = isPartyA.value
+        ? '/trade/confirm-party-a'
+        : '/trade/confirm-party-b'
+
+    const response = await fetch(
+        `${import.meta.env.VITE_API_BASE_URL || 'http://localhost:8096/apis'}${confirmUrl}?${params}`,
+        {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${localStorage.getItem('token')}`,
+            'Content-Type': 'application/json'
+          }
+        }
     )
+
+
+    if (!response.ok) {
+      const errorData = await response.json()
+      throw new Error(errorData.message || '后端校验失败')
+    }
+
+    console.log('✅ 后端校验通过，txHash已保存')
+
+    // 2. 再调用链上合约
+    const { ethers } = await import('ethers')
+    const provider = new ethers.BrowserProvider(window.ethereum)
+    const signer = await provider.getSigner()
+
+    const exchangeABI = [
+      "function confirmPartyA(uint256 tradeId, string calldata txHash) external",
+      "function confirmPartyB(uint256 tradeId, string calldata txHash) external"
+    ]
+
+    const exchangeAddress = import.meta.env.VITE_EXCHANGE_CONTRACT_ADDRESS
+    const exchangeContract = new ethers.Contract(exchangeAddress, exchangeABI, signer)
+
+    const chainTradeId = trade.value.chainTradeId
+
+    let tx
+    if (isPartyA.value) {
+      console.log('Calling chain confirmPartyA with chainTradeId:', chainTradeId, 'txHash:', confirmForm.value.txHash)
+      tx = await exchangeContract.confirmPartyA(chainTradeId, confirmForm.value.txHash)
+    } else {
+      console.log('Calling chain confirmPartyB with chainTradeId:', chainTradeId, 'txHash:', confirmForm.value.txHash)
+      tx = await exchangeContract.confirmPartyB(chainTradeId, confirmForm.value.txHash)
+    }
+
+    console.log('Transaction sent:', tx.hash)
+    await tx.wait()
+
+    console.log('Chain confirmation confirmed:', tx.hash)
+
     confirmDialogVisible.value = false
-    await loadTradeDetail() // ✅ 已有刷新
-    ElMessage.success('操作成功')
+    if (trade.value.chainTradeId) {
+      await loadDetail(trade.value.chainTradeId.toString())
+    } else {
+      await loadTradeDetail()
+    }
+    ElMessage.success('确认转账成功，等待链上确认')
+
   } catch (error) {
-    console.error('Confirm failed:', error)
-    ElMessage.error('操作失败：' + (error.message || '未知错误'))
+    console.error('Confirm transfer failed:', error)
+    ElMessage.error('操作失败：' + (error.reason || error.message || '未知错误'))
   } finally {
     confirming.value = false
   }
 }
+
 
 async function submitDisputeHandler() {
   if (!disputeForm.value.reason) {
@@ -621,7 +836,7 @@ async function submitDisputeHandler() {
   }
 
   const payload = {
-    tradeId: trade.value.tradeId,
+    chainTradeId: trade.value.chainTradeId,
     reason: disputeForm.value.reason,
     evidence: disputeForm.value.description
   }
@@ -630,7 +845,11 @@ async function submitDisputeHandler() {
   try {
     await submitDispute(payload)
     disputeDialogVisible.value = false
-    await loadTradeDetail() // ✅ 已有刷新
+    if (trade.value.chainTradeId) {
+      await loadDetail(trade.value.chainTradeId.toString())
+    } else {
+      await loadTradeDetail()
+    }
     ElMessage.success('争议提交成功')
   } catch (error) {
     console.error('Dispute failed:', error)
@@ -666,7 +885,9 @@ function getDisputeReasonText(reason) {
 
 // 监听交易详情变化，检查授权状态
 watch(() => trade.value, async (newTrade) => {
-  if (newTrade && isPartyA.value && getStatus.value === TRADE_STATUS.PARTY_B_CONFIRMED) {
+  if (newTrade && (getStatus.value === TRADE_STATUS.MATCHED ||
+      getStatus.value === TRADE_STATUS.PARTY_A_CONFIRMED ||
+      getStatus.value === TRADE_STATUS.PARTY_B_CONFIRMED)) {
     await checkAllowanceStatus()
   }
 }, { immediate: true })
@@ -674,15 +895,10 @@ watch(() => trade.value, async (newTrade) => {
 // 检查授权状态（直接读取链上数据）
 async function checkAllowanceStatus() {
   try {
-    if (!window.ethereum) {
-      console.error('MetaMask not installed')
-      return
-    }
-
     const provider = new ethers.BrowserProvider(window.ethereum)
     const signer = await provider.getSigner()
+    const address = await signer.getAddress()
 
-    // EXTH 合约 ABI（简化版）
     const exthABI = [
       "function allowance(address owner, address spender) view returns (uint256)",
       "function decimals() view returns (uint8)"
@@ -691,35 +907,31 @@ async function checkAllowanceStatus() {
     const exthContract = new ethers.Contract(
         import.meta.env.VITE_EXTH_CONTRACT_ADDRESS,
         exthABI,
-        signer
+        provider
     )
 
     const allowanceValue = await exthContract.allowance(
-        walletStore.address,
-        import.meta.env.VITE_EXCHANGE_CONTRACT_ADDRESS || '0xf7674eB800475D17973F743964ab9f38A43df761'
+        address,
+        import.meta.env.VITE_EXCHANGE_CONTRACT_ADDRESS
     )
 
     allowance.value = allowanceValue.toString()
 
-    // EXTH 是 6 位精度，计算手续费：0.05 EXTH = 50000 (最小单位)
-    const feeAmount = BigInt(50000) // 0.05 EXTH (6 位精度)
+    // 修改：使用 trade.value.feeAmount 替代硬编码的 50000
+    const feeAmountInWei = ethers.parseUnits((trade.value.feeAmount || 0.01).toString(), 6)
 
-    needApprove.value = allowanceValue < feeAmount
+    needApprove.value = allowanceValue < feeAmountInWei
     approvalConfirmed.value = !needApprove.value
 
     console.log('Allowance check:', {
       allowance: allowance.value,
-      feeAmount: feeAmount.toString(),
+      feeAmount: feeAmountInWei.toString(),
+      feeAmountHuman: trade.value.feeAmount,
       needApprove: needApprove.value,
       spender: import.meta.env.VITE_EXCHANGE_CONTRACT_ADDRESS
     })
-
-    if (!needApprove.value) {
-      ElMessage.success('授权已生效！')
-    }
   } catch (err) {
     console.error('Failed to check allowance:', err)
-    // ElMessage.error('查询授权失败')
   }
 }
 
@@ -735,8 +947,11 @@ async function handleApprove() {
       return
     }
 
+    const feeAmount = trade.value.feeAmount || 0.01
+    const roleText = isPartyA.value ? '甲方' : '乙方'
+
     await ElMessageBox.confirm(
-        '需要授权 Exchange 合约使用您的 EXTH 代币支付手续费，是否继续？',
+        `${roleText}需要授权 Exchange 合约使用 ${feeAmount} EXTH 支付本次交易手续费，是否继续？`,
         '授权确认',
         {
           confirmButtonText: '确定',
@@ -748,7 +963,6 @@ async function handleApprove() {
     const provider = new ethers.BrowserProvider(window.ethereum)
     const signer = await provider.getSigner()
 
-    // EXTH 合约 ABI
     const exthABI = [
       "function approve(address spender, uint256 amount) returns (bool)",
       "function decimals() view returns (uint8)"
@@ -760,37 +974,24 @@ async function handleApprove() {
         signer
     )
 
-    // EXTH 是 6 位精度，授权 1 EXTH = 1,000,000
-    const amount = ethers.parseUnits('1', 6) // 1 EXTH (6 位精度)
+    const amount = ethers.parseUnits(feeAmount.toString(), 6)
 
-    console.log('Approving:', {
-      spender: import.meta.env.VITE_EXCHANGE_CONTRACT_ADDRESS,
-      amount: amount.toString()
-    })
+    console.log(' Approving EXTH for this trade:', feeAmount, 'EXTH')
 
     const tx = await exthContract.approve(
-        import.meta.env.VITE_EXCHANGE_CONTRACT_ADDRESS || '0xf7674eB800475D17973F743964ab9f38A43df761',
+        import.meta.env.VITE_EXCHANGE_CONTRACT_ADDRESS,
         amount
     )
 
     console.log('Approve tx sent:', tx.hash)
     ElMessage.info('等待交易确认中...')
 
-    // 等待交易被打包
     const receipt = await tx.wait()
 
     console.log('Approve confirmed:', receipt.transactionHash)
-    ElMessage.success('授权成功！')
+    ElMessage.success(`授权成功！本次授权额度：${feeAmount} EXTH`)
 
-    // 重新检查授权状态
     await checkAllowanceStatus()
-
-    // 如果已授权，提示用户可以进行最终确认
-    if (!needApprove.value) {
-      ElMessage.success('授权已生效，现在可以点击"确认完成交易"按钮')
-    } else {
-      ElMessage.warning('授权额度不足，请重试')
-    }
 
   } catch (err) {
     if (err !== 'cancel') {
@@ -803,7 +1004,6 @@ async function handleApprove() {
 }
 
 
-
 async function loadTradeDetail() {
   loading.value = true
   error.value = ''
@@ -812,7 +1012,16 @@ async function loadTradeDetail() {
   try {
     console.log('⏳ Before loadDetail - trade:', trade.value)
 
-    await loadDetail(route.params.id)
+    const tradeId = route.params.id
+
+    if (trade.value && trade.value.chainTradeId) {
+      console.log('🔄 Using chainTradeId from existing trade:', trade.value.chainTradeId)
+      await loadDetail(trade.value.chainTradeId.toString())
+    } else {
+      console.log('🔄 Using route param as tradeId:', tradeId)
+      await loadDetail(tradeId)
+    }
+
 
     // 等待下一个 tick，确保响应式更新完成
     await new Promise(resolve => setTimeout(resolve, 100))

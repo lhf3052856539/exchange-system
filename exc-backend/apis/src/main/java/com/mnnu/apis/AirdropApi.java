@@ -8,27 +8,16 @@ import org.springframework.web.bind.annotation.*;
 
 import java.math.BigInteger;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 空投 API 接口
  */
 
 public interface AirdropApi {
+    JsonVO<Map<String, Object>> getClaimInfo(@CurrentUser String address);
 
 
-    /**
-     *
-     * @param address
-     * @param request
-     * @return
-     */
-    JsonVO<Void> claimAirdrop(@CurrentUser String address,
-                                    @RequestBody AirdropClaimRequest request);
 
-
-    JsonVO<Boolean> hasClaimed(@RequestParam String address);
-
-
-    JsonVO<AirdropInfoDTO> getAirdropInfo(@RequestParam String address);
 }
 

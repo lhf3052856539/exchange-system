@@ -18,8 +18,7 @@ public class ProposalDTO implements Serializable {
     private BigInteger deadline;
     private BigInteger yesVotes;
     private BigInteger noVotes;
-    private Boolean executed;
-    private Boolean queued;
+    private String callData;
     private String targetContract;
     private BigInteger value;
     private BigInteger eta;

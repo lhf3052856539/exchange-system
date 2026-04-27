@@ -81,63 +81,7 @@ public class ExchangeWrapper extends BaseWrapper{
 
         log.info("Exchange contract loaded successfully: {}", contract.getContractAddress());
     }
-    /**
-     * 创建交易对
-     */
-    public String createTradePair(String partyA, String partyB, BigInteger amount,BigInteger feeAmount) throws Exception {
-        try {
-            // 发送交易并获取回执
-            TransactionReceipt receipt = contract.createTradePair(partyA, partyB, amount,feeAmount).send();
 
-            log.info("Transaction sent: txHash={}", receipt.getTransactionHash());
-            log.info("Transaction status: {}", receipt.getStatus());
-            log.info("Gas used: {}", receipt.getGasUsed());
-
-            // 打印所有日志
-            if (receipt.getLogs() != null && !receipt.getLogs().isEmpty()) {
-                log.info("Found {} logs in receipt", receipt.getLogs().size());
-                for (int i = 0; i < receipt.getLogs().size(); i++) {
-                    log.info("Log[{}]: topics={}, data={}",
-                            i,
-                            receipt.getLogs().get(i).getTopics(),
-                            receipt.getLogs().get(i).getData());
-                }
-            } else {
-                log.warn("No logs found in receipt!");
-            }
-
-            // 从事件中提取 tradeId
-            List<Exchange.TradeMatchedEventResponse> events = getTradeMatchedEvents(receipt);
-            log.info("Parsed {} TradeMatched events using web3j getter", events != null ? events.size() : 0);
-
-            if (events != null && !events.isEmpty()) {
-                BigInteger tradeId = events.get(0).tradeId;
-                log.info("✅ Trade pair created on chain: tradeId={}, txHash={}", tradeId, receipt.getTransactionHash());
-                return tradeId.toString();
-            }
-
-            // 如果 web3j 的事件解析失败，尝试手动解析
-            log.warn("⚠️ Web3j event parsing failed, trying manual extraction...");
-
-            // 手动解析第一个 topic 作为 tradeId（这是最后的手段）
-            if (receipt.getLogs() != null && !receipt.getLogs().isEmpty()) {
-                String firstTopic = receipt.getLogs().get(0).getTopics().get(1); // tradeId 通常是第二个 topic
-                if (firstTopic != null) {
-                    BigInteger manualTradeId = Numeric.decodeQuantity(firstTopic);
-                    log.info("✅ Manually extracted tradeId: {}", manualTradeId);
-                    return manualTradeId.toString();
-                }
-            }
-
-            // 如果还是没有，返回交易哈希作为后备
-            log.error("❌ All methods failed, returning txHash: {}", receipt.getTransactionHash());
-            return receipt.getTransactionHash();
-
-        } catch (Exception e) {
-            log.error("❌ createTradePair failed: {}", e.getMessage(), e);
-            throw e;
-        }
-    }
 
 
     /**
@@ -180,9 +124,9 @@ public class ExchangeWrapper extends BaseWrapper{
      * 获取交易信息
      */
     public TradeInfo getTradeInfo(BigInteger tradeId) throws Exception {
-        Tuple9<String, String, BigInteger, BigInteger,BigInteger,BigInteger, String,BigInteger,BigInteger> result = contract.getTradeInfo(tradeId).send();
+        Tuple10<String, String, BigInteger, BigInteger,BigInteger,BigInteger,BigInteger, String,BigInteger,BigInteger> result = contract.getTradeInfo(tradeId).send();
         return new TradeInfo(result.component1(), result.component2(), result.component3(),
-                result.component4(), result.component5(), result.component6(), result.component7(), result.component8(),result.component9());
+                result.component4(), result.component5(), result.component6(), result.component7(), result.component8(),result.component9(),result.component10());
     }
 
 
@@ -211,12 +155,13 @@ public class ExchangeWrapper extends BaseWrapper{
         public BigInteger exthReward;
         public BigInteger feeAmount;
         public BigInteger state;
+        public BigInteger disputeStatus;
         public String disputedParty;
         public BigInteger completeTime;
         public BigInteger createTime;
 
         public TradeInfo(String partyA, String partyB, BigInteger amount,
-                         BigInteger exthReward,BigInteger feeAmount,BigInteger state, String disputedParty,BigInteger completeTime,
+                         BigInteger exthReward,BigInteger feeAmount,BigInteger state,BigInteger disputeStatus, String disputedParty,BigInteger completeTime,
                          BigInteger createTime) {
             this.partyA = partyA;
             this.partyB = partyB;
@@ -224,6 +169,7 @@ public class ExchangeWrapper extends BaseWrapper{
             this.exthReward = exthReward;
             this.feeAmount = feeAmount;
             this.state = state;
+            this.disputeStatus = disputeStatus;
             this.disputedParty = disputedParty;
             this.completeTime = completeTime;
             this.createTime = createTime;
@@ -238,21 +184,22 @@ public class ExchangeWrapper extends BaseWrapper{
         }
 
     }
-    /**
-     * 监听 TradeMatched 事件
-     */
-    public Flowable<Exchange.TradeMatchedEventResponse> tradeMatchedEventFlowable(
-            DefaultBlockParameterName startBlock,
-            DefaultBlockParameterName endBlock) {
-        return contract.tradeMatchedEventFlowable(startBlock, endBlock);
-    }
 
     /**
-     * 获取交易收据中的 TradeMatched 事件
+     * 注册用户
      */
-    public List<Exchange.TradeMatchedEventResponse> getTradeMatchedEvents(TransactionReceipt receipt) {
-        return Exchange.getTradeMatchedEvents(receipt);
+    public String registerUser() throws Exception {
+        return contract.registerUser().send().getTransactionHash();
     }
+    /**
+     * 监听 TradeCreate 事件
+     */
+    public Flowable<Exchange.TradeCreateEventResponse> tradeCreateEventFlowable(
+            DefaultBlockParameterName startBlock,
+            DefaultBlockParameterName endBlock) {
+        return contract.tradeCreateEventFlowable(startBlock, endBlock);
+    }
+
 
     /**
      * 监听 TradeCompleted 事件
@@ -279,6 +226,22 @@ public class ExchangeWrapper extends BaseWrapper{
             DefaultBlockParameterName startBlock,
             DefaultBlockParameterName endBlock) {
         return contract.userUpgradedEventFlowable(startBlock, endBlock);
+    }
+
+    /**
+     * 标记交易为过期状态
+     */
+    public TransactionReceipt expireTrade(BigInteger tradeId) throws Exception {
+        return contract.expireTrade(tradeId).send();
+    }
+
+    /**
+     * 监听 TradeExpired 事件 (交易过期)
+     */
+    public Flowable<Exchange.TradeExpiredEventResponse> tradeExpiredEventFlowable(
+            DefaultBlockParameterName startBlock,
+            DefaultBlockParameterName endBlock) {
+        return contract.tradeExpiredEventFlowable(startBlock, endBlock);
     }
 
     /**

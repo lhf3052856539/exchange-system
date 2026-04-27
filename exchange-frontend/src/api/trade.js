@@ -12,6 +12,22 @@ export function requestMatch(data) {
     })
 }
 
+export function getUserTrades(address, status, page = 1, size = 10) {
+    return request({
+        url: '/trade/list',
+        method: 'get',
+        params: { address, status, page, size }
+    })
+}
+
+export const createTradePair = (data) => {
+    return request({
+        url: '/trade/create-pair',
+        method: 'post',
+        data
+    })
+}
+
 export function confirmPartyA(address, tradeId, txHash) {
     return request({
         url: '/trade/confirm-party-a',
@@ -69,15 +85,3 @@ export function getTradeDetail(tradeId) {
     })
 }
 
-export function getUserTrades(address, status = null, page = 1, size = 10) {
-    return request({
-        url: '/trade/list',
-        method: 'get',
-        params: {
-            address: String(address),
-            status,
-            page,
-            size
-        }
-    })
-}

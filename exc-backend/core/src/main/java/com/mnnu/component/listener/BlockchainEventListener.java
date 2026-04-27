@@ -4,40 +4,41 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.mnnu.component.handler.CustomWebSocketHandler;
 import com.mnnu.constant.SystemConstants;
 import com.mnnu.dto.DisputeDTO;
-import com.mnnu.dto.NotificationDTO;
 import com.mnnu.entity.*;
 import com.mnnu.mapper.*;
 import com.mnnu.service.*;
-import com.mnnu.wrapper.AirdropWrapper;
-import com.mnnu.wrapper.DaoWrapper;
-import com.mnnu.wrapper.ExchangeWrapper;
-import com.mnnu.wrapper.TreasureWrapper;
+import com.mnnu.wrapper.*;
+import com.rabbitmq.client.Channel;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.redisson.api.RBucket;
+import org.redisson.api.RLock;
 import org.redisson.api.RedissonClient;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.amqp.support.AmqpHeaders;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.messaging.handler.annotation.Header;
 import org.springframework.stereotype.Component;
 import org.web3j.protocol.Web3j;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.time.Instant;
 import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.CompletableFuture;
+import java.util.*;
 
-import static com.mnnu.constant.SystemConstants.DisputeStatus.PENDING;
+import static com.mnnu.constant.SystemConstants.MQQueue.BLOCKCHAIN_EVENT;
+import static com.mnnu.constant.SystemConstants.RedisKey.*;
 import static com.mnnu.constant.SystemConstants.TradeConstants.TRADE_TIMEOUT_HOURS;
-import static com.mnnu.constant.SystemConstants.TradeStatus.RESOLVED;
+import static com.mnnu.utils.Web3jUtil.fromChainUnit;
+import static java.util.concurrent.TimeUnit.SECONDS;
 
 /**
  * 区块链事件监听器
@@ -48,42 +49,10 @@ import static com.mnnu.constant.SystemConstants.TradeStatus.RESOLVED;
 public class BlockchainEventListener {
 
     /**
-     * 区块链服务
-     */
-    private final BlockchainService blockchainService;
-    /**
-     * 交易服务
-     */
-    private final TradeService tradeService;
-    /**
-     * 用户服务
-     */
-    private final UserService userService;
-    /**
-     * 空投服务
-     */
-    private final AirdropService airdropService;
-    /**
      * 通知服务
      */
     private final NotificationService notificationService;
-    /**
-     * 对象映射器
-     */
-    private final ObjectMapper objectMapper;
 
-
-    /**
-     * Web3j 客户端
-     */
-    @Autowired
-    private Web3j web3j;
-
-    /**
-     * 空投合约包装器
-     */
-    @Autowired
-    private AirdropWrapper airdropWrapper;
 
     /**
      * DAO 合约包装器
@@ -92,22 +61,10 @@ public class BlockchainEventListener {
     private DaoWrapper daoWrapper;
 
     /**
-     * 财库合约包装器
-     */
-    @Autowired
-    private TreasureWrapper treasureWrapper;
-
-    /**
      * Exchange 合约包装器
      */
     @Autowired
     private ExchangeWrapper exchangeContract;
-
-    /**
-     * RabbitMQ 模板
-     */
-    @Autowired
-    private RabbitTemplate rabbitTemplate;
     @Autowired
     private UserMapper userMapper;
     /**
@@ -132,40 +89,74 @@ public class BlockchainEventListener {
     private AirdropConfigMapper airdropConfigMapper;
     @Autowired
     private AirdropWhitelistMapper airdropWhitelistMapper;
-
-    // application.yml 注入合约地址
-    @Value("${contracts.exth}")
-    private String exthContractAddress;
+    @Autowired
+    private EXTHWrapper exthWrapper;
+    @Autowired
+    private MultiSigWalletWrapper multiSigWalletWrapper;
 
 
     /**
-     * 处理区块链事件
-     * - Transfer: 代币转账事件
-     * - TradeMatched: 交易匹配事件
-     * - TradeCompleted: 交易完成事件
-     * - AirdropClaimed: 空投领取事件
-     * - UserBlacklisted: 用户拉黑事件
-     * - RewardDistributed: 奖励发放事件
-     * - ProposalExecuted: 提案执行事件
+     * 校验事件是否已处理（基于 txHash + eventType 防重）
      */
+    private boolean isEventProcessed(String txHash, String eventType) {
+        if (txHash == null || txHash.isEmpty()) {
+            return false;
+        }
 
-    @RabbitListener(queues = SystemConstants.MQQueue.BLOCKCHAIN_EVENT)
-    public void handleBlockchainEvent(Map<String, Object> event) {
+        // 生成唯一Key：blockchain:event:processed:{eventType}:{txHash}
+        String dedupKey = EVENT_PROCESSED_KEY_PREFIX + eventType + ":" + txHash;
+
+        // 使用 Redisson 的 RBucket.trySet() 实现 SETNX
+        RBucket<Integer> bucket = redissonClient.getBucket(dedupKey);
+        boolean wasAbsent = bucket.trySet(1, EVENT_DEDUP_EXPIRE_SECONDS, SECONDS);
+
+        // 如果 wasAbsent 为 false，说明 key 已存在，事件已处理过
+        boolean alreadyProcessed = !wasAbsent;
+
+        if (alreadyProcessed) {
+            log.warn("Event already processed: eventType={}, txHash={}", eventType, txHash);
+        }
+
+        return alreadyProcessed;
+    }
+
+
+    // application.yml 注入合约地址
+    @Value("${contract.exth.address}")
+    private String exthContractAddress;
+
+
+    @RabbitListener(queues = BLOCKCHAIN_EVENT, ackMode = "MANUAL")
+    public void handleBlockchainEvent(Map<String, Object> event, Channel channel,
+                                      @Header(AmqpHeaders.DELIVERY_TAG) long deliveryTag) {
         if (event == null || event.isEmpty()) {
             log.warn("Received empty blockchain event");
+            try {
+                // 空消息直接确认
+                channel.basicAck(deliveryTag, false);
+            } catch (Exception e) {
+                log.error("Failed to ack empty message", e);
+            }
             return;
         }
 
         try {
             String eventType = (String) event.get("event");
-            log.info("Received blockchain event: type={}, data={}", eventType, event);
+            String txHash = (String) event.get("txHash");
+
+            // 先检查是否已处理（防重）
+            if (isEventProcessed(txHash, eventType)) {
+                log.info("Event skipped (duplicate): type={}, txHash={}", eventType, txHash);
+                // 重复消息也要确认，避免无限重试
+                channel.basicAck(deliveryTag, false);
+                return;
+            }
+
+            log.info("Received blockchain event: type={}, txHash={}, data={}", eventType, txHash, event);
 
             switch (eventType) {
-                case "Transfer":
-                    handleTransferEvent(event);
-                    break;
-                case "TradeMatched":
-                    handleTradeMatchedEvent(event);
+                case "TradeCreate":
+                    handleTradeCreateEvent(event);
                     break;
                 case "TradeCompleted":
                     handleTradeCompletedEvent(event);
@@ -207,9 +198,6 @@ public class BlockchainEventListener {
                 case "CommitteeMemberRemoved":
                     handleCommitteeMemberRemovedEvent(event);
                     break;
-                case "DisputeResolved":
-                    handleDisputeResolvedEvent(event);
-                    break;
                 case "UserUpgraded":
                     handleUserUpgradedEvent(event);
                     break;
@@ -225,6 +213,9 @@ public class BlockchainEventListener {
                 case "TradeDisputed":
                     handleTradeDisputedEvent(event);
                     break;
+                case "TradeExpired":
+                    handleTradeExpiredEvent(event);
+                    break;
                 // 多签钱包（仲裁）相关事件
                 case "ArbitrationProposalCreated":
                     handleArbitrationProposalCreatedEvent(event);
@@ -232,307 +223,420 @@ public class BlockchainEventListener {
                 case "ArbitrationProposalVoted":
                     handleArbitrationProposalVotedEvent(event);
                     break;
-                case "ArbitrationProposalFinalized":
-                    handleArbitrationProposalFinalizedEvent(event);
+                case "ArbitrationProposalExecuted":
+                    handleArbitrationProposalExecutedEvent(event);
+                    break;
+                case "ArbitrationProposalRejected":
+                    handleArbitrationProposalRejectedEvent(event);
+                    break;
+                case "ArbitrationProposalExpired":
+                    handleArbitrationProposalExpiredEvent(event);
                     break;
                 default:
                     log.warn("Unknown event type: {}", eventType);
             }
+
+            // 所有业务逻辑执行成功后，手动 ACK
+            channel.basicAck(deliveryTag, false);
+            log.info("Event processed successfully: type={}, txHash={}", eventType, txHash);
+
         } catch (Exception e) {
             log.error("Error processing blockchain event: {}", event, e);
-        }
-    }
 
-    /**
-     * 处理转账事件
-     * 通知策略：实时推送到账通知
-     */
-    private void handleTransferEvent(Map<String, Object> event) {
-        try {
-            String from = (String) event.get("from");
-            String to = (String) event.get("to");
-            String valueStr = (String) event.get("value");
-            BigInteger value = new BigInteger(valueStr);
-            String txHash = (String) event.get("txHash");
-            Number timestamp = (Number) event.get("timestamp");
-
-            log.info("Processing Transfer event: from={}, to={}, value={}", from, to, value);
-
-            // 1. 更新用户余额（从链上同步）
-            userService.updateExthBalanceOnChain(to);
-            if (from != null && !from.equalsIgnoreCase("0x0000000000000000000000000000000000000000")) {
-                userService.updateExthBalanceOnChain(from);
+            try {
+                // 处理失败，拒绝消息并重新入队（requeue=true）
+                // 这样 MQ 会重新投递该消息，触发重试
+                channel.basicNack(deliveryTag, false, true);
+                log.warn("Message nacked and will be requeued for retry");
+            } catch (Exception nackException) {
+                log.error("Failed to nack message", nackException);
             }
 
-            // 2. 检查是否为空投领取
-            checkAndNotifyAirdrop(to, value, timestamp);
-
-            // 3. ✅ 发送实时通知给用户
-            sendTransferNotification(to, from, value, txHash, timestamp);
-
-        } catch (Exception e) {
-            log.error("Failed to process transfer event", e);
+            // 抛出异常让 Spring AMQP 的重试机制介入
+            throw new RuntimeException("Failed to process blockchain event", e);
         }
     }
+
 
     /**
      * 处理空投领取事件 (Merkle Airdrop)
      */
     private void handleAirdropEvent(Map<String, Object> event) {
         try {
-            String recipient = (String) event.get("recipient");
+            String recipient = (String) event.get("claimant");
             String amountStr = (String) event.get("amount");
             String txHash = (String) event.get("txHash");
 
             log.info("Processing AirdropClaimed: recipient={}, amount={}", recipient, amountStr);
 
-            CompletableFuture.runAsync(() -> {
-                try {
-                    // 找到当前活跃的配置
-                    LambdaQueryWrapper<AirdropConfigEntity> configWrapper = new LambdaQueryWrapper<>();
-                    configWrapper.eq(AirdropConfigEntity::getStatus, 1).last("LIMIT 1");
-                    AirdropConfigEntity config = airdropConfigMapper.selectOne(configWrapper);
+            RLock lock = redissonClient.getLock(AIRDROP_LOCK_KEY_PREFIX + recipient);
+            try {
+                if (!lock.tryLock(10, 30, SECONDS)) {
+                    log.warn("Airdrop claim for {} locked, skip processing", recipient);
+                    return;
+                }
 
-                    if (config != null) {
-                        // 更新白名单状态
-                        LambdaQueryWrapper<AirdropWhitelistEntity> whiteWrapper = new LambdaQueryWrapper<>();
-                        whiteWrapper.eq(AirdropWhitelistEntity::getConfigId, config.getId())
-                                .eq(AirdropWhitelistEntity::getAddress, recipient);
+                LambdaQueryWrapper<AirdropConfigEntity> configWrapper = new LambdaQueryWrapper<>();
+                configWrapper.eq(AirdropConfigEntity::getStatus, 1).last("LIMIT 1");
+                AirdropConfigEntity config = airdropConfigMapper.selectOne(configWrapper);
 
-                        AirdropWhitelistEntity record = airdropWhitelistMapper.selectOne(whiteWrapper);
-                        if (record != null && !record.getHasClaimed()) {
-                            record.setHasClaimed(true);
-                            record.setClaimTxHash(txHash);
-                            record.setClaimTime(LocalDateTime.now());
-                            airdropWhitelistMapper.updateById(record);
+                if (config != null) {
+                    LambdaQueryWrapper<AirdropWhitelistEntity> whiteWrapper = new LambdaQueryWrapper<>();
+                    whiteWrapper.eq(AirdropWhitelistEntity::getConfigId, config.getId())
+                            .eq(AirdropWhitelistEntity::getAddress, recipient);
 
-                            // 发送通知
+                    AirdropWhitelistEntity record = airdropWhitelistMapper.selectOne(whiteWrapper);
+                    if (record != null && !record.getHasClaimed()) {
+                        record.setHasClaimed(true);
+                        record.setClaimTxHash(txHash);
+                        record.setClaimTime(LocalDateTime.now());
+
+                        int updateCount = airdropWhitelistMapper.updateById(record);
+
+                        if (updateCount > 0) {
+                            updateOnChainBalance(recipient);
+
+                            BigDecimal airdropAmount = record.getAmount().setScale(0, BigDecimal.ROUND_HALF_UP);
                             notificationService.sendSystemNotification(recipient, "空投领取成功",
-                                    String.format("您已成功领取 %s 个 EXTH 代币。", amountStr));
+                                    String.format("您已成功领取 %s 个 EXTH 代币。", airdropAmount));
+
+                            log.info("Airdrop claim synced for {} and notification sent", recipient);
+                        } else {
+                            log.warn("Failed to update airdrop claim record for {}", recipient);
                         }
                     }
-
-                } catch (Exception e) {
-                    log.error("Failed to sync airdrop claim", e);
                 }
-            });
+            } finally {
+                if (lock.isHeldByCurrentThread()) {
+                    lock.unlock();
+                }
+            }
+
         } catch (Exception e) {
             log.error("Error handling AirdropClaimed event", e);
+            throw new RuntimeException("Failed to process AirdropClaimed event", e);
         }
     }
 
+
     /**
-     * 处理交易匹配事件（创建交易对）
+     * 处理交易对创建事件
      */
-    private void handleTradeMatchedEvent(Map<String, Object> event) {
+    private void handleTradeCreateEvent(Map<String, Object> event) {
         try {
             String tradeIdStr = (String) event.get("tradeId");
+            String chainTradeIdStr = (String) event.get("chainTradeId");
             BigInteger tradeId = new BigInteger(tradeIdStr);
             String txHash = (String) event.get("txHash");
 
-            log.info("Processing TradeCreated event: tradeId={}, txHash={}", tradeId, txHash);
+            log.info("Processing TradeCreated event: tradeId={}, chainTradeId={}, txHash={}", tradeId, chainTradeIdStr, txHash);
 
-            CompletableFuture.runAsync(() -> {
-                try {
-                    // 从链上拉取该交易的完整信息
-                    ExchangeWrapper.TradeInfo info = exchangeContract.getTradeInfo(tradeId);
+            Long chainTradeId = Long.valueOf(chainTradeIdStr);
 
-                    if (info != null) {
-                        // 构建数据库实体
-                        TradeRecordEntity trade = new TradeRecordEntity();
-                        //trade.setTradeId(tradeId.toString()); // 业务 ID
-                        trade.setChainTradeId(Long.valueOf(tradeId.toString()));       // 链上索引 ID
-                        trade.setPartyA(info.partyA);
-                        trade.setPartyB(info.partyB);
-                        trade.setAmount(new BigDecimal(info.amount));
-
-                        trade.setExthReward(new BigDecimal(info.exthReward));
-                        trade.setFeeAmount(new BigDecimal(info.feeAmount));
-                        trade.setStatus(1); // 1-已匹配/已创建
-
-                        // 转换链上时间戳 (BigInteger) 为 Java 时间对象 (LocalDateTime)
-                        long createTimestamp = info.createTime.longValue();
-                        LocalDateTime createDateTime = LocalDateTime.ofEpochSecond(createTimestamp, 0, java.time.ZoneOffset.UTC);
-                        LocalDateTime expireDateTime = createDateTime.plusHours(TRADE_TIMEOUT_HOURS);
-
-                        trade.setCreateTime(createDateTime);
-                        trade.setExpireTime(expireDateTime);
-
-                        // 插入或更新数据库
-                        TradeRecordEntity existing = tradeMapper.selectByTradeId(tradeIdStr);
-                        if (existing == null) {
-                            tradeMapper.insert(trade);
-                            log.info("New trade {} synced to DB from chain.", tradeId);
-                        } else {
-                            tradeMapper.updateById(existing);
-                        }
-
-                        // 发送通知给交易双方（使用统一通知服务）
-                        if (info.partyA != null && !info.partyA.isEmpty()) {
-                            notificationService.sendTradeNotification(info.partyA, tradeIdStr, "created");
-                        }
-                        if (info.partyB != null && !info.partyB.isEmpty()) {
-                            notificationService.sendTradeNotification(info.partyB, tradeIdStr, "created");
-                        }
-                    }
-                } catch (Exception e) {
-                    log.error("Failed to sync trade creation for ID: {}", tradeId, e);
+            RLock lock = redissonClient.getLock(TRADE_LOCK_KEY_PREFIX + chainTradeId);
+            try {
+                if (!lock.tryLock(10, 30, SECONDS)) {
+                    log.warn("Trade {} locked, skip processing", chainTradeId);
+                    return;
                 }
-            });
+
+                ExchangeWrapper.TradeInfo info = exchangeContract.getTradeInfo(BigInteger.valueOf(chainTradeId));
+
+                if (info != null) {
+                    log.info("Chain data - chainTradeId: {}, amount: {}, partyA: {}, partyB: {}",
+                            chainTradeId, info.amount, info.partyA, info.partyB);
+
+                    TradeRecordEntity existing = tradeMapper.selectOne(
+                            new LambdaQueryWrapper<TradeRecordEntity>()
+                                    .eq(TradeRecordEntity::getTradeId, tradeIdStr)
+                    );
+
+                    if (existing == null) {
+                        log.error("Trade with tradeId={} not found in DB, skipping sync", tradeIdStr);
+                        return;
+                    }
+
+                    existing.setChainTradeId(chainTradeId);
+
+                    if (info.exthReward != null && info.exthReward.compareTo(BigInteger.ZERO) > 0) {
+                        existing.setExthReward(fromChainUnit(info.exthReward));
+                    }
+                    if (info.feeAmount != null && info.feeAmount.compareTo(BigInteger.ZERO) > 0) {
+                        existing.setFeeAmount(fromChainUnit(info.feeAmount));
+                    }
+                    existing.setStatus(info.state.intValue());
+                    existing.setDisputeStatus(info.disputeStatus.intValue());
+
+                    if (info.createTime != null && info.createTime.longValue() > 0) {
+                        long createTimestamp = info.createTime.longValue();
+                        LocalDateTime createDateTime = LocalDateTime.ofEpochSecond(
+                                createTimestamp, 0, ZoneId.of("Asia/Shanghai").getRules().getOffset(Instant.now())
+                        );
+                        LocalDateTime expireDateTime = createDateTime.plusHours(TRADE_TIMEOUT_HOURS);
+                        existing.setCreateTime(createDateTime);
+                        existing.setExpireTime(expireDateTime);
+                    }
+
+                    int updateCount = tradeMapper.updateById(existing);
+
+                    if (updateCount > 0) {
+                        log.info("Trade {} (chainId: {}) updated from chain. Final amount: {}",
+                                existing.getTradeId(), chainTradeId, existing.getAmount());
+
+                        if (existing.getPartyA() != null && !existing.getPartyA().isEmpty()) {
+                            notificationService.sendTradeNotification(existing.getPartyA(), existing.getTradeId(), "created");
+                            log.info("Sent notification to PartyA: {}", existing.getPartyA());
+                        } else {
+                            log.error("️ PartyA address is EMPTY for trade {}", existing.getTradeId());
+                        }
+
+                        if (existing.getPartyB() != null && !existing.getPartyB().isEmpty()) {
+                            notificationService.sendTradeNotification(existing.getPartyB(), existing.getTradeId(), "created");
+                            log.info(" Sent notification to PartyB: {}", existing.getPartyB());
+                        } else {
+                            log.error("️ PartyB address is EMPTY for trade {}", existing.getTradeId());
+                        }
+                    } else {
+                        log.warn("Failed to update trade {} in database", existing.getTradeId());
+                    }
+                }
+            } finally {
+                if (lock.isHeldByCurrentThread()) {
+                    lock.unlock();
+                }
+            }
 
         } catch (Exception e) {
             log.error("Error processing TradeCreated event", e);
+            throw new RuntimeException("Failed to process TradeCreated event", e);
         }
     }
+
 
     /**
      * 处理交易完成事件
-     * 关键改进：当监听到 TradeCompleted 事件时，更新所有相关状态
      */
     private void handleTradeCompletedEvent(Map<String, Object> event) {
         try {
-            String tradeIdStr = (String) event.get("tradeId");
-            BigInteger tradeId = new BigInteger(tradeIdStr);
+            String chainTradeIdStr = (String) event.get("tradeId");
+            Long chainTradeId = Long.parseLong(chainTradeIdStr);
             String txHash = (String) event.get("txHash");
 
-            log.info("Processing TradeCompleted event: tradeId={}", tradeId);
+            log.info("Processing TradeCompleted event: chainTradeId={}", chainTradeId);
 
-            // 异步同步交易数据到数据库并发送通知
-            CompletableFuture.runAsync(() -> {
-                try {
-                    // 从链上获取交易完整信息
-                    ExchangeWrapper.TradeInfo tradeInfo = exchangeContract.getTradeInfo(tradeId);
+            RLock lock = redissonClient.getLock(TRADE_LOCK_KEY_PREFIX + chainTradeId);
+            try {
+                if (!lock.tryLock(10, 30, SECONDS)) {
+                    log.warn("Trade {} locked, skip processing", chainTradeId);
+                    return;
+                }
+
+                TradeRecordEntity trade = tradeMapper.selectOne(
+                        new LambdaQueryWrapper<TradeRecordEntity>()
+                                .eq(TradeRecordEntity::getChainTradeId, chainTradeId)
+                );
+
+                if (trade != null) {
+                    ExchangeWrapper.TradeInfo tradeInfo = exchangeContract.getTradeInfo(BigInteger.valueOf(chainTradeId));
 
                     if (tradeInfo != null) {
-                        // 查找链下对应的交易记录（使用链上 ID 查询）
-                        TradeRecordEntity trade = tradeMapper.selectByTradeId(tradeIdStr);
+                        trade.setStatus(tradeInfo.state.intValue());
+                        trade.setChainTxHash(txHash);
 
-                        if (trade != null) {
-                            // 同步关键状态字段
-                            trade.setStatus(tradeInfo.state.intValue()); // 更新为链上真实状态
-                            trade.setChainTxHash(txHash);
+                        if (tradeInfo.completeTime != null && tradeInfo.completeTime.longValue() > 0) {
+                            trade.setCompleteTime(
+                                    LocalDateTime.ofEpochSecond(tradeInfo.completeTime.longValue(), 8, ZoneOffset.UTC)
+                            );
+                        }
 
-                            // 转换链上完成时间戳
-                            if (tradeInfo.completeTime != null && tradeInfo.completeTime.longValue() > 0) {
-                                trade.setCompleteTime(
-                                        LocalDateTime.ofEpochSecond(tradeInfo.completeTime.longValue(), 0, ZoneOffset.UTC)
-                                );
-                            }
+                        int updateCount = tradeMapper.updateById(trade);
 
-                            // 更新数据库
-                            tradeMapper.updateById(trade);
-                            log.info("Trade {} marked as completed in DB.", tradeIdStr);
+                        if (updateCount > 0) {
+                            log.info("Trade {} (chainId: {}) marked as completed in DB.", trade.getTradeId(), chainTradeId);
 
-                            // 发送通知给交易双方
-                            if (trade.getPartyA() != null && !trade.getPartyA().isEmpty()) {
-                                notificationService.sendTradeNotification(trade.getPartyA(), tradeIdStr, "completed");
-                            }
-                            if (trade.getPartyB() != null && !trade.getPartyB().isEmpty()) {
-                                notificationService.sendTradeNotification(trade.getPartyB(), tradeIdStr, "completed");
-                            }
+                            updateOnChainBalance(trade.getPartyA());
+                            updateOnChainBalance(trade.getPartyB());
+
+                            notificationService.sendTradeNotification(trade.getPartyA(), trade.getTradeId(), "completed");
+                            notificationService.sendTradeNotification(trade.getPartyB(), trade.getTradeId(), "completed");
+
+                            log.info("Notifications sent for completed trade {}", trade.getTradeId());
                         } else {
-                            log.warn("️ Trade record not found in DB for chain ID: {}", tradeIdStr);
+                            log.warn("Failed to update trade {} completion status in database", trade.getTradeId());
                         }
                     }
-                } catch (Exception e) {
-                    log.error("Failed to sync TradeCompleted info from chain", e);
+                } else {
+                    log.warn("Trade record not found in DB for chain ID: {}", chainTradeId);
                 }
-            });
+            } finally {
+                if (lock.isHeldByCurrentThread()) {
+                    lock.unlock();
+                }
+            }
 
         } catch (Exception e) {
             log.error("Error processing TradeCompleted event", e);
+            throw new RuntimeException("Failed to process TradeCompleted event", e);
         }
     }
 
+
+    /**
+     * 查询并更新用户的链上EXTH余额
+     */
+    private void updateOnChainBalance(String address) {
+        RLock lock = redissonClient.getLock(TRADE_LOCK_KEY_PREFIX + address);
+        try {
+            if (!lock.tryLock(5, 10, SECONDS)) {
+                log.warn("Balance update for {} locked, skip processing", address);
+                return;
+            }
+
+            BigInteger chainBalance = exthWrapper.balanceOf(address);
+            BigDecimal balance = fromChainUnit(chainBalance);
+
+            LambdaQueryWrapper<UserEntity> userWrapper = new LambdaQueryWrapper<>();
+            userWrapper.eq(UserEntity::getAddress, address);
+            UserEntity user = userMapper.selectOne(userWrapper);
+
+            if (user != null) {
+                user.setExthBalance(balance);
+                userMapper.updateById(user);
+                log.info("Updated EXTH balance after trade: address={}, balance={}", address, balance);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.error("Balance update for {} interrupted", address, e);
+        } catch (Exception e) {
+            log.error("Failed to update balance from chain for address: {}", address, e);
+        } finally {
+            if (lock.isHeldByCurrentThread()) {
+                lock.unlock();
+            }
+        }
+    }
 
 
     /**
      * 处理 MultiSigWallet 委员会成员添加事件
      */
     private void handleCommitteeMemberAddedEvent(Map<String, Object> event) {
+        String txHash = (String) event.get("txHash");
         try {
             String memberAddress = (String) event.get("member");
             log.info("Processing CommitteeMemberAdded: {}", memberAddress);
 
-            CompletableFuture.runAsync(() -> {
-                try {
-                    LambdaQueryWrapper<CommitteeMemberEntity> wrapper = new LambdaQueryWrapper<>();
-                    wrapper.eq(CommitteeMemberEntity::getAddress, memberAddress);
-                    CommitteeMemberEntity existing = committeeMemberMapper.selectOne(wrapper);
+            RLock lock = redissonClient.getLock(COMMITTEE_LOCK_KEY_PREFIX + memberAddress);
+            try {
+                if (!lock.tryLock(10, 30, SECONDS)) {
+                    log.warn("Committee member {} locked, skip processing", memberAddress);
+                    return;
+                }
 
-                    if (existing == null) {
-                        CommitteeMemberEntity member = new CommitteeMemberEntity();
-                        member.setAddress(memberAddress);
-                        member.setIsActive(true);
-                        member.setJoinTime(LocalDateTime.now());
-                        member.setUpdateTime(LocalDateTime.now());
-                        committeeMemberMapper.insert(member);
+                LambdaQueryWrapper<CommitteeMemberEntity> wrapper = new LambdaQueryWrapper<>();
+                wrapper.eq(CommitteeMemberEntity::getAddress, memberAddress);
+                CommitteeMemberEntity existing = committeeMemberMapper.selectOne(wrapper);
 
+                if (existing == null) {
+                    CommitteeMemberEntity member = new CommitteeMemberEntity();
+                    member.setAddress(memberAddress);
+                    member.setIsActive(true);
+                    member.setJoinTime(LocalDateTime.now());
+                    member.setUpdateTime(LocalDateTime.now());
+
+                    int insertCount = committeeMemberMapper.insert(member);
+
+                    if (insertCount > 0) {
                         notificationService.sendSystemNotification(
                                 memberAddress,
                                 "您已被任命为仲裁委员会成员",
                                 "committee_appointed"
                         );
 
-                        log.info(" Committee member added: {}", memberAddress);
+                        log.info("Committee member added and notification sent: {}", memberAddress);
                     } else {
-                        existing.setIsActive(true);
-                        existing.setUpdateTime(LocalDateTime.now());
-                        committeeMemberMapper.updateById(existing);
+                        log.warn("Failed to insert committee member: {}", memberAddress);
+                    }
+                } else {
+                    existing.setIsActive(true);
+                    existing.setUpdateTime(LocalDateTime.now());
 
+                    int updateCount = committeeMemberMapper.updateById(existing);
+
+                    if (updateCount > 0) {
                         notificationService.sendSystemNotification(
                                 memberAddress,
                                 "您的仲裁委员会成员资格已恢复",
                                 "committee_reactivated"
                         );
 
-                        log.info(" Committee member reactivated: {}", memberAddress);
+                        log.info("Committee member reactivated and notification sent: {}", memberAddress);
+                    } else {
+                        log.warn("Failed to update committee member: {}", memberAddress);
                     }
-                } catch (Exception e) {
-                    log.error("Failed to sync committee member added", e);
                 }
-            });
+            } finally {
+                if (lock.isHeldByCurrentThread()) {
+                    lock.unlock();
+                }
+            }
         } catch (Exception e) {
             log.error("Error handling CommitteeMemberAdded event", e);
+            throw new RuntimeException("Failed to process CommitteeMemberAdded event", e);
         }
     }
+
 
     /**
      * 处理 MultiSigWallet 委员会成员移除事件
      */
     private void handleCommitteeMemberRemovedEvent(Map<String, Object> event) {
+        String txHash = (String) event.get("txHash");
         try {
             String memberAddress = (String) event.get("member");
             log.info("Processing CommitteeMemberRemoved: {}", memberAddress);
 
-            CompletableFuture.runAsync(() -> {
-                try {
-                    LambdaQueryWrapper<CommitteeMemberEntity> wrapper = new LambdaQueryWrapper<>();
-                    wrapper.eq(CommitteeMemberEntity::getAddress, memberAddress);
-                    CommitteeMemberEntity existing = committeeMemberMapper.selectOne(wrapper);
+            RLock lock = redissonClient.getLock(COMMITTEE_LOCK_KEY_PREFIX + memberAddress);
+            try {
+                if (!lock.tryLock(10, 30, SECONDS)) {
+                    log.warn("Committee member {} locked, skip processing", memberAddress);
+                    return;
+                }
 
-                    if (existing != null) {
-                        existing.setIsActive(false);
-                        existing.setLeaveTime(LocalDateTime.now());
-                        existing.setUpdateTime(LocalDateTime.now());
-                        committeeMemberMapper.updateById(existing);
+                LambdaQueryWrapper<CommitteeMemberEntity> wrapper = new LambdaQueryWrapper<>();
+                wrapper.eq(CommitteeMemberEntity::getAddress, memberAddress);
+                CommitteeMemberEntity existing = committeeMemberMapper.selectOne(wrapper);
 
+                if (existing != null) {
+                    existing.setIsActive(false);
+                    existing.setLeaveTime(LocalDateTime.now());
+                    existing.setUpdateTime(LocalDateTime.now());
+
+                    int updateCount = committeeMemberMapper.updateById(existing);
+
+                    if (updateCount > 0) {
                         notificationService.sendSystemNotification(
                                 memberAddress,
                                 "您的仲裁委员会成员资格已被移除",
                                 "committee_removed"
                         );
 
-                        log.info(" Committee member deactivated: {}", memberAddress);
+                        log.info("Committee member deactivated and notification sent: {}", memberAddress);
+                    } else {
+                        log.warn("Failed to deactivate committee member: {}", memberAddress);
                     }
-                } catch (Exception e) {
-                    log.error("Failed to sync committee member removed", e);
                 }
-            });
+            } finally {
+                if (lock.isHeldByCurrentThread()) {
+                    lock.unlock();
+                }
+            }
         } catch (Exception e) {
             log.error("Error handling CommitteeMemberRemoved event", e);
+            throw new RuntimeException("Failed to process CommitteeMemberRemoved event", e);
         }
     }
+
 
 
     /**
@@ -546,10 +650,18 @@ public class BlockchainEventListener {
 
             log.info("Processing DAO ProposalCreated: id={}, proposer={}", proposalId, proposer);
 
-            CompletableFuture.runAsync(() -> {
-                try {
-                    daoService.syncProposalFromChain(proposalId, proposer, txHash);
+            RLock lock = redissonClient.getLock(DAO_SYNC_LOCK_KEY_PREFIX + proposalId);
+            try {
+                if (!lock.tryLock(10, 30, SECONDS)) {
+                    log.warn("DAO proposal {} locked, skip processing", proposalId);
+                    return;
+                }
 
+                // 先同步数据到数据库
+                boolean syncSuccess = daoService.syncProposalFromChain(proposalId, proposer, txHash);
+
+                // 只有同步成功后才发送通知
+                if (syncSuccess) {
                     notificationService.sendDaoProposalNotification(
                             proposer,
                             proposalId,
@@ -557,22 +669,28 @@ public class BlockchainEventListener {
                             "created"
                     );
 
-                    log.info("DAO proposal {} synced and notified", proposalId);
-
-                } catch (Exception e) {
-                    log.error("Failed to sync DAO proposal created", e);
+                    log.info("DAO proposal {} synced and notification sent", proposalId);
+                } else {
+                    log.warn("Failed to sync DAO proposal {}: sync returned false", proposalId);
                 }
-            });
+            } finally {
+                if (lock.isHeldByCurrentThread()) {
+                    lock.unlock();
+                }
+            }
         } catch (Exception e) {
             log.error("Error handling DAO ProposalCreated event", e);
+            throw new RuntimeException("Failed to process DAO ProposalCreated event", e);
         }
     }
+
 
     /**
      * 处理 DAO 投票事件
      */
     private void handleDaoVoteCastEvent(Map<String, Object> event) {
         try {
+            String txHash = (String) event.get("txHash");
             String proposalIdStr = String.valueOf(event.get("proposalId"));
             BigInteger proposalId = new BigInteger(proposalIdStr);
             String voter = (String) event.get("voter");
@@ -581,16 +699,24 @@ public class BlockchainEventListener {
 
             log.info("Processing DAO VoteCast: proposalId={}", proposalId);
 
-            CompletableFuture.runAsync(() -> {
-                try {
-                    daoService.syncProposalVotesFromChain(proposalId);
+            RLock lock = redissonClient.getLock(DAO_SYNC_LOCK_KEY_PREFIX + proposalIdStr);
+            try {
+                if (!lock.tryLock(10, 30, SECONDS)) {
+                    log.warn("DAO proposal {} locked, skip processing", proposalIdStr);
+                    return;
+                }
 
+                // 先同步投票数据到数据库
+                boolean syncSuccess = daoService.syncProposalVotesFromChain(proposalId);
+
+                // 只有同步成功后才发送通知
+                if (syncSuccess) {
                     LambdaQueryWrapper<ProposalRecordEntity> wrapper = new LambdaQueryWrapper<>();
-                    wrapper.eq(ProposalRecordEntity::getProposalId, proposalId.toString());
+                    wrapper.eq(ProposalRecordEntity::getProposalId, proposalIdStr);
                     ProposalRecordEntity record = proposalRecordMapper.selectOne(wrapper);
 
                     if (record != null) {
-                        String action = support ? "voted_support" : "voted_against";
+                        String action = "voted";
                         notificationService.sendDaoProposalNotification(
                                 voter,
                                 proposalIdStr,
@@ -604,41 +730,56 @@ public class BlockchainEventListener {
                                 "新投票 #" + proposalId,
                                 "received_vote"
                         );
+
+                        log.info("DAO vote synced and notifications sent for proposal {}", proposalId);
                     }
-                } catch (Exception e) {
-                    log.error("Failed to sync DAO vote", e);
+                } else {
+                    log.warn("Failed to sync DAO votes for proposal {}: sync returned false", proposalId);
                 }
-            });
+            } finally {
+                if (lock.isHeldByCurrentThread()) {
+                    lock.unlock();
+                }
+            }
         } catch (Exception e) {
             log.error("Error handling DAO VoteCast event", e);
+            throw new RuntimeException("Failed to process DAO VoteCast event", e);
         }
     }
+
 
     /**
      * 处理 DAO 提案入列（进入公示期）事件
      */
     private void handleDaoProposalQueuedEvent(Map<String, Object> event) {
         try {
+            String txHash = (String) event.get("txHash");
             String proposalIdStr = String.valueOf(event.get("proposalId"));
             BigInteger proposalId = new BigInteger(proposalIdStr);
+            String etaStr = (String) event.get("eta");
 
             log.info("Processing DAO ProposalQueued: id={}", proposalId);
 
-            CompletableFuture.runAsync(() -> {
-                try {
-                    // 更新数据库状态为 4 (Queued)
-                    LambdaQueryWrapper<ProposalRecordEntity> wrapper = new LambdaQueryWrapper<>();
-                    wrapper.eq(ProposalRecordEntity::getProposalId, proposalId.toString());
-                    ProposalRecordEntity record = proposalRecordMapper.selectOne(wrapper);
+            RLock lock = redissonClient.getLock(DAO_SYNC_LOCK_KEY_PREFIX + proposalIdStr);
+            try {
+                if (!lock.tryLock(10, 30, SECONDS)) {
+                    log.warn("DAO proposal {} locked, skip processing", proposalIdStr);
+                    return;
+                }
 
-                    if (record != null) {
-                        // 从链上获取 eta (执行时间)
-                        DaoWrapper.ProposalInfo info = daoWrapper.getProposal(proposalId);
-                        if (info.eta != null) {
-                            record.setDeadline(info.eta.longValue());
-                        }
-                        record.setStatus(info.status);
-                        proposalRecordMapper.updateById(record);
+                // 更新数据库状态为 4 (Queued)
+                LambdaQueryWrapper<ProposalRecordEntity> wrapper = new LambdaQueryWrapper<>();
+                wrapper.eq(ProposalRecordEntity::getProposalId, proposalIdStr);
+                ProposalRecordEntity record = proposalRecordMapper.selectOne(wrapper);
+
+                if (record != null) {
+                    DaoWrapper.ProposalInfo info = daoWrapper.getProposal(proposalId);
+                    record.setEta(Long.parseLong(etaStr));
+                    record.setStatus(info.status);
+
+                    int updateCount = proposalRecordMapper.updateById(record);
+
+                    if (updateCount > 0) {
                         notificationService.sendDaoProposalNotification(
                                 record.getProposer(),
                                 proposalIdStr,
@@ -646,60 +787,80 @@ public class BlockchainEventListener {
                                 "proposal_queued"
                         );
 
-                        log.info(" Proposal {} status updated to Queued and notified", proposalId);
+                        log.info("Proposal {} status updated to Queued and notification sent", proposalId);
+                    } else {
+                        log.warn("Failed to update proposal {} status to Queued", proposalId);
                     }
-                } catch (Exception e) {
-                    log.error("Failed to sync DAO proposal queued", e);
                 }
-            });
+            } finally {
+                if (lock.isHeldByCurrentThread()) {
+                    lock.unlock();
+                }
+            }
         } catch (Exception e) {
             log.error("Error handling DAO ProposalQueued event", e);
+            throw new RuntimeException("Failed to process DAO ProposalQueued event", e);
         }
     }
+
 
     /**
      * 处理 DAO 提案执行事件
      */
     private void handleDaoProposalExecutedEvent(Map<String, Object> event) {
         try {
+            String txHash = (String) event.get("txHash");
             String proposalIdStr = String.valueOf(event.get("proposalId"));
             BigInteger proposalId = new BigInteger(proposalIdStr);
 
             log.info("Processing DAO ProposalExecuted: id={}", proposalId);
 
-            CompletableFuture.runAsync(() -> {
-                try {
-                    DaoWrapper.ProposalInfo info = daoWrapper.getProposal(proposalId);
+            RLock lock = redissonClient.getLock(DAO_SYNC_LOCK_KEY_PREFIX + proposalIdStr);
+            try {
+                if (!lock.tryLock(10, 30, SECONDS)) {
+                    log.warn("DAO proposal {} locked, skip processing", proposalIdStr);
+                    return;
+                }
 
-                    LambdaQueryWrapper<ProposalRecordEntity> wrapper = new LambdaQueryWrapper<>();
-                    wrapper.eq(ProposalRecordEntity::getProposalId, proposalId.toString());
-                    ProposalRecordEntity record = proposalRecordMapper.selectOne(wrapper);
+                DaoWrapper.ProposalInfo info = daoWrapper.getProposal(proposalId);
 
-                    if (record != null) {
-                        record.setStatus(info.status); // Executed
-                        proposalRecordMapper.updateById(record);
+                LambdaQueryWrapper<ProposalRecordEntity> wrapper = new LambdaQueryWrapper<>();
+                wrapper.eq(ProposalRecordEntity::getProposalId, proposalIdStr);
+                ProposalRecordEntity record = proposalRecordMapper.selectOne(wrapper);
 
+                if (record != null) {
+                    record.setStatus(info.status); // Executed
+
+                    int updateCount = proposalRecordMapper.updateById(record);
+
+                    if (updateCount > 0) {
                         notificationService.sendDaoProposalNotification(
                                 record.getProposer(),
                                 proposalIdStr,
                                 "提案 #" + proposalId + " 已执行",
                                 "proposal_executed"
                         );
-                        log.info(" Proposal {} marked as executed", proposalId);
+                        log.info("Proposal {} marked as executed and notification sent", proposalId);
 
                         // 检查是否为空投提案并初始化配置
                         initAirdropConfigIfMatched(proposalIdStr, record.getDescription());
-
+                    } else {
+                        log.warn("Failed to update proposal {} status to Executed", proposalId);
                     }
-                } catch (Exception e) {
-                    log.error("Failed to sync DAO proposal executed", e);
+
                 }
-            });
+            } finally {
+                if (lock.isHeldByCurrentThread()) {
+                    lock.unlock();
+                }
+            }
         } catch (Exception e) {
             log.error("Error handling DAO ProposalExecuted event", e);
+            throw new RuntimeException("Failed to process DAO ProposalExecuted event", e);
         }
 
     }
+
 
     /**
      * 如果提案描述包含特定关键词，则初始化空投配置
@@ -711,13 +872,19 @@ public class BlockchainEventListener {
                 // 读取 Merkle Root (从项目里的 merkle-output.json 读取)
                 String merkleRoot = loadMerkleRootFromJson();
 
+                Map<String, String> whitelistMap = loadWhitelistMap();
+
+                BigDecimal totalAmount = whitelistMap.values().stream()
+                        .map(BigDecimal::new)
+                        .reduce(BigDecimal.ZERO, BigDecimal::add);
+
                 // 创建配置记录
                 AirdropConfigEntity config = new AirdropConfigEntity();
                 config.setProposalId(proposalId);
                 config.setMerkleRoot(merkleRoot);
                 config.setStatus(1); // 1-进行中
                 config.setTokenAddress(exthContractAddress);
-                config.setTotalAmount(java.math.BigDecimal.ZERO); // 初始为0，后续根据链上余额更新
+                config.setTotalAmount(totalAmount.divide(BigDecimal.TEN.pow(6)));
                 LocalDateTime now = LocalDateTime.now();
                 config.setStartTime(now);
                 // 设置结束时间：设置为当前时间的 30 天后
@@ -736,6 +903,13 @@ public class BlockchainEventListener {
         }
     }
 
+    private Map<String, String> loadWhitelistMap() throws Exception {
+        String filePath = "D:/Users/asus/Desktop/区块链项目/exchange-system/exc-contracts/whitelist.json";
+        String content = new String(Files.readAllBytes(Paths.get(filePath)));
+        return new ObjectMapper().readValue(content, new TypeReference<>() {
+        });
+    }
+
     /**
      * 从 JSON 文件加载 Merkle Root
      */
@@ -743,7 +917,8 @@ public class BlockchainEventListener {
         // 路径根据实际部署位置调整，这里指向 exc-contracts 目录下的输出文件
         String filePath = "D:/Users/asus/Desktop/区块链项目/exchange-system/exc-contracts/merkle-output.json";
         String content = new String(Files.readAllBytes(Paths.get(filePath)));
-        Map<String, Object> map = new ObjectMapper().readValue(content, new TypeReference<Map<String, Object>>() {});
+        Map<String, Object> map = new ObjectMapper().readValue(content, new TypeReference<>() {
+        });
         return (String) map.get("merkleRoot");
     }
 
@@ -755,15 +930,16 @@ public class BlockchainEventListener {
         String content = new String(Files.readAllBytes(Paths.get(filePath)));
 
         // 解析 JSON: {"address": "amount", ...}
-        Map<String, String> whitelistMap = new ObjectMapper().readValue(content, new TypeReference<Map<String, String>>() {});
+        Map<String, String> whitelistMap = new ObjectMapper().readValue(content, new TypeReference<Map<String, String>>() {
+        });
 
-        List<AirdropWhitelistEntity> list = new java.util.ArrayList<>();
+        List<AirdropWhitelistEntity> list = new ArrayList<>();
         for (Map.Entry<String, String> entry : whitelistMap.entrySet()) {
             AirdropWhitelistEntity entity = new AirdropWhitelistEntity();
             entity.setConfigId(configId);
             entity.setAddress(entry.getKey());
             // JSON 里是带小数位的字符串，如果是整数需根据合约 decimals 转换
-            entity.setAmount(new java.math.BigDecimal(entry.getValue()).divide(java.math.BigDecimal.TEN.pow(6)));
+            entity.setAmount(new BigDecimal(entry.getValue()).divide(BigDecimal.TEN.pow(6)));
             entity.setHasClaimed(false);
             list.add(entity);
         }
@@ -786,23 +962,30 @@ public class BlockchainEventListener {
      */
     private void handleDaoProposalCanceledEvent(Map<String, Object> event) {
         try {
+            String txHash = (String) event.get("txHash");
             String proposalIdStr = String.valueOf(event.get("proposalId"));
             BigInteger proposalId = new BigInteger(proposalIdStr);
 
             log.info("Processing DAO ProposalCanceled: id={}", proposalId);
 
-            CompletableFuture.runAsync(() -> {
-                try {
-                    DaoWrapper.ProposalInfo info = daoWrapper.getProposal(proposalId);
+            RLock lock = redissonClient.getLock(DAO_SYNC_LOCK_KEY_PREFIX + proposalIdStr);
+            try {
+                if (!lock.tryLock(10, 30, SECONDS)) {
+                    log.warn("DAO proposal {} locked, skip processing", proposalIdStr);
+                    return;
+                }
 
-                    LambdaQueryWrapper<ProposalRecordEntity> wrapper = new LambdaQueryWrapper<>();
-                    wrapper.eq(ProposalRecordEntity::getProposalId, proposalId.toString());
-                    ProposalRecordEntity record = proposalRecordMapper.selectOne(wrapper);
+                DaoWrapper.ProposalInfo info = daoWrapper.getProposal(proposalId);
 
-                    if (record != null) {
-                        record.setStatus(info.status); // Canceled
-                        proposalRecordMapper.updateById(record);
+                LambdaQueryWrapper<ProposalRecordEntity> wrapper = new LambdaQueryWrapper<>();
+                wrapper.eq(ProposalRecordEntity::getProposalId, proposalIdStr);
+                ProposalRecordEntity record = proposalRecordMapper.selectOne(wrapper);
 
+                if (record != null) {
+                    record.setStatus(info.status); // Canceled
+                    int updateCount = proposalRecordMapper.updateById(record);
+
+                    if (updateCount > 0) {
                         notificationService.sendDaoProposalNotification(
                                 record.getProposer(),
                                 proposalIdStr,
@@ -811,15 +994,21 @@ public class BlockchainEventListener {
                         );
 
                         log.info("Proposal {} marked as canceled", proposalId);
+                    } else {
+                        log.warn("Failed to update proposal {} in database", proposalId);
                     }
-                } catch (Exception e) {
-                    log.error("Failed to sync DAO proposal canceled", e);
                 }
-            });
+            } finally {
+                if (lock.isHeldByCurrentThread()) {
+                    lock.unlock();
+                }
+            }
         } catch (Exception e) {
             log.error("Error handling DAO ProposalCanceled event", e);
+            throw new RuntimeException("Failed to process DAO ProposalCanceled event", e);
         }
     }
+
 
 
     /**
@@ -831,139 +1020,144 @@ public class BlockchainEventListener {
             String txHash = (String) event.get("txHash");
             log.info("Processing UserBlacklisted: user={}, txHash={}", user, txHash);
 
-            CompletableFuture.runAsync(() -> {
+            RLock lock = redissonClient.getLock(USER_LOCK_KEY_PREFIX + user);
+            try {
+                if (!lock.tryLock(10, 30, SECONDS)) {
+                    log.warn("User {} locked, skip processing", user);
+                    return;
+                }
+
                 UserEntity userEntity = userMapper.selectByAddress(user);
                 if (userEntity != null && !userEntity.getIsBlacklisted()) {
                     userEntity.setIsBlacklisted(true);
                     userEntity.setUpdateTime(LocalDateTime.now());
-                    userMapper.updateById(userEntity);
 
-                    notificationService.sendSystemNotification(user, "账户受限通知",
-                            "由于您的账户存在违规行为，已被列入系统黑名单。如有疑问请联系仲裁委员会。");
-                    log.info("User {} blacklisted in DB and notified.", user);
+                    int updateCount = userMapper.updateById(userEntity);
+
+                    if (updateCount > 0) {
+                        notificationService.sendSystemNotification(user, "账户受限通知",
+                                "由于您的账户存在违规行为，已被列入系统黑名单。如有疑问请联系仲裁委员会。");
+                        log.info("User {} blacklisted in DB and notification sent.", user);
+                    } else {
+                        log.warn("Failed to blacklist user {}", user);
+                    }
                 }
-            });
+            } finally {
+                if (lock.isHeldByCurrentThread()) {
+                    lock.unlock();
+                }
+            }
         } catch (Exception e) {
-            log.error("Failed to process user blacklist event", e);
+            log.error("Error handling UserBlacklist event", e);
+            throw new RuntimeException("Failed to process UserBlacklist event", e);
         }
     }
+
+
 
     /**
      * 处理手续费收取事件
      */
     private void handleFeeCollectedEvent(Map<String, Object> event) {
         try {
-            String tradeId = String.valueOf(event.get("tradeId"));
+            String txHash = (String) event.get("txHash");
+            // 这里的 tradeId 实际上是合约 emit 出来的 chainTradeId
+            String chainTradeIdStr = String.valueOf(event.get("tradeId"));
+            Long chainTradeId = Long.parseLong(chainTradeIdStr);
+
             String payerA = (String) event.get("feePayerA");
             String payerB = (String) event.get("feePayerB");
             String feeAmount = String.valueOf(event.get("feeAmount"));
 
-            log.info("Processing FeeCollected: tradeId={}, payers={}/{}", tradeId, payerA, payerB);
+            log.info("Processing FeeCollected: chainTradeId={}, payers={}/{}", chainTradeId, payerA, payerB);
 
-            // 异步记录财务流水或更新交易表的实收手续费字段
-            CompletableFuture.runAsync(() -> {
-                TradeRecordEntity trade = tradeMapper.selectByTradeId(tradeId);
-                if (trade != null) {
-                    // 可以在这里记录具体的扣费日志到 t_fee_log 表
-                    log.info("Fee of {} EXTH collected for trade {}", feeAmount, tradeId);
+            RLock lock = redissonClient.getLock(TRADE_LOCK_KEY_PREFIX + chainTradeId);
+            try {
+                if (!lock.tryLock(10, 30, SECONDS)) {
+                    log.warn("Trade {} locked, skip processing", chainTradeId);
+                    return;
                 }
-            });
+
+                // 使用 LambdaQueryWrapper 精确匹配 chain_trade_id 字段
+                TradeRecordEntity trade = tradeMapper.selectOne(
+                        new LambdaQueryWrapper<TradeRecordEntity>()
+                                .eq(TradeRecordEntity::getChainTradeId, chainTradeId)
+                );
+
+                if (trade != null) {
+                    // 通知 PartyA
+                    notificationService.sendSystemNotification(payerA, "手续费扣除通知",
+                            String.format("您的交易 #%s 已成功完成，系统已自动扣除 %s EXTH 作为手续费。", trade.getTradeId(), feeAmount));
+
+                    // 通知 PartyB
+                    notificationService.sendSystemNotification(payerB, "手续费扣除通知",
+                            String.format("您的交易 #%s 已成功完成，系统已自动扣除 %s EXTH 作为手续费。", trade.getTradeId(), feeAmount));
+
+                    log.info("Fee collection notifications sent for local trade {}", trade.getTradeId());
+                } else {
+                    log.warn("Local trade record not found for chainTradeId: {}", chainTradeId);
+                }
+            } finally {
+                if (lock.isHeldByCurrentThread()) {
+                    lock.unlock();
+                }
+            }
         } catch (Exception e) {
             log.error("Failed to process fee collected event", e);
+            throw new RuntimeException("Failed to process fee collected event", e);
         }
     }
+
 
     /**
      * 处理赔偿支付事件 (由 Treasure 合约触发)
      */
     private void handleCompensationPaidEvent(Map<String, Object> event) {
         try {
-            String tradeId = String.valueOf(event.get("tradeId"));
+            // 这里的 tradeId 实际上是链上的 chainTradeId
+            String chainTradeIdStr = String.valueOf(event.get("tradeId"));
+            Long chainTradeId = Long.parseLong(chainTradeIdStr);
+
             String recipient = (String) event.get("recipient");
             String amount = String.valueOf(event.get("amount"));
             String txHash = (String) event.get("txHash");
 
-            log.info("Processing CompensationPaid: tradeId={}, recipient={}, amount={}", tradeId, recipient, amount);
+            log.info("Processing CompensationPaid: chainTradeId={}, recipient={}, amount={}", chainTradeId, recipient, amount);
 
-            CompletableFuture.runAsync(() -> {
-                // 更新争议记录的最终执行状态
-                DisputeRecordEntity dispute = disputeRecordMapper.selectOne(
-                        new QueryWrapper<DisputeRecordEntity>().eq("trade_id", tradeId)
+            RLock lock = redissonClient.getLock(TRADE_LOCK_KEY_PREFIX + chainTradeId);
+            try {
+                if (!lock.tryLock(10, 30, SECONDS)) {
+                    log.warn("Trade {} locked, skip processing", chainTradeId);
+                    return;
+                }
+
+                // 根据链上 ID 查找本地交易记录
+                TradeRecordEntity trade = tradeMapper.selectOne(
+                        new LambdaQueryWrapper<TradeRecordEntity>()
+                                .eq(TradeRecordEntity::getChainTradeId, chainTradeId)
                 );
 
-                if (dispute != null) {
-                    dispute.setProposalStatus(3); // 假设 3 代表已执行赔偿
-                    disputeRecordMapper.updateById(dispute);
-                }
-
-                // 2. 通知收款方
-                notificationService.sendSystemNotification(recipient, "仲裁赔偿金到账",
-                        String.format("关于订单 %s 的仲裁赔偿款 %s USDT 已打入您的账户。交易哈希: %s",
-                                tradeId, amount, txHash));
-
-                // 再次通知双方争议彻底终结
-                TradeRecordEntity trade = tradeMapper.selectByTradeId(tradeId);
                 if (trade != null) {
-                    notificationService.sendArbitrationNotification(trade.getPartyA(), tradeId, "party_a", "compensation_paid");
-                    notificationService.sendArbitrationNotification(trade.getPartyB(), tradeId, "party_b", "compensation_paid");
+                    // 通知收款方（使用本地业务ID）
+                    notificationService.sendSystemNotification(recipient, "仲裁赔偿金到账",
+                            String.format("关于订单 %s 的仲裁赔偿款 %s USDT 已打入您的账户。交易哈希: %s",
+                                    trade.getTradeId(), amount, txHash));
+
+                    log.info("Compensation notifications sent for local trade {}", trade.getTradeId());
+                } else {
+                    log.warn("Local trade record not found for chainTradeId: {}", chainTradeId);
                 }
-            });
+            } finally {
+                if (lock.isHeldByCurrentThread()) {
+                    lock.unlock();
+                }
+            }
         } catch (Exception e) {
             log.error("Failed to process compensation paid event", e);
+            throw new RuntimeException("Failed to process compensation paid event", e);
         }
     }
 
-
-    /**
-     * 监听链上争议解决事件
-     * 核心原则：状态由链上事件驱动，数据库仅做持久化记录
-     */
-    public void handleDisputeResolvedEvent(Map<String, Object> event) {
-        try {
-            String tradeId = String.valueOf(event.get("tradeId"));
-            String txHash = (String) event.get("txHash");
-            log.info("Received DisputeResolved event from chain for trade: {}", tradeId);
-
-            // 使用异步处理，避免阻塞事件监听器
-            CompletableFuture.runAsync(() -> {
-                try {
-                    // 1. 从链上获取最终状态和详细信息
-                    ExchangeWrapper.TradeInfo chainInfo = exchangeContract.getTradeInfo(new BigInteger(tradeId));
-
-                    // 2. 根据链上数据更新数据库
-                    TradeRecordEntity trade = tradeMapper.selectByTradeId(tradeId);
-                    if (trade != null) {
-                        // 直接使用链上返回的真实状态 (state 6 = Resolved)
-                        trade.setStatus(chainInfo.state.intValue());
-
-                        // 同步争议相关字段
-                        trade.setDisputeStatus(RESOLVED); // 2-已解决
-
-                        // 使用链上的完成时间戳
-                        if (chainInfo.completeTime != null && chainInfo.completeTime.longValue() > 0) {
-                            trade.setCompleteTime(
-                                    LocalDateTime.ofEpochSecond(chainInfo.completeTime.longValue(), 0, ZoneOffset.UTC)
-                            );
-                        }
-                        trade.setChainTxHash(txHash);
-
-                        tradeMapper.updateById(trade);
-                        log.info("Trade {} status synced from chain: state={}, disputedParty={}",
-                                tradeId, chainInfo.state, chainInfo.disputedParty);
-
-                        // 分别通知交易双方
-                        notificationService.sendArbitrationNotification(trade.getPartyA(), tradeId, "party_a", "resolved");
-                        notificationService.sendArbitrationNotification(trade.getPartyB(), tradeId, "party_b", "resolved");
-                    }
-                } catch (Exception e) {
-                    log.error("Failed to handle DisputeResolved event for trade {}", tradeId, e);
-                }
-            });
-
-        } catch (Exception e) {
-            log.error("Failed to process DisputeResolved event", e);
-        }
-    }
 
     /**
      * 处理仲裁提案创建事件
@@ -971,85 +1165,95 @@ public class BlockchainEventListener {
     private void handleArbitrationProposalCreatedEvent(Map<String, Object> event) {
         try {
             String proposalId = String.valueOf(event.get("proposalId"));
-            String tradeId = String.valueOf(event.get("tradeId"));
-            String accusedAddress = String.valueOf(event.get("accused"));
-            String victimAddress = String.valueOf(event.get("victim"));
-            String compensationAmount = String.valueOf(event.get("compensationAmount"));
-            String txHash = String.valueOf(event.get("txHash"));
+            String chainTradeId = String.valueOf(event.get("tradeId"));
+            String accusedAddress = String.valueOf(event.get("accusedParty"));
+            String txHash = (String) event.get("txHash");
 
             log.info("Processing ArbitrationProposalCreated: proposalId={}, tradeId={}, accused={}",
-                    proposalId, tradeId, accusedAddress);
+                    proposalId, chainTradeId, accusedAddress);
 
-            // 异步同步数据并发送通知
-            CompletableFuture.runAsync(() -> {
-                try {
-                    // 查找并更新争议记录
-                    DisputeRecordEntity dispute = disputeRecordMapper.selectOne(
-                            new QueryWrapper<com.mnnu.entity.DisputeRecordEntity>()
-                                    .eq("trade_id", tradeId)
-                    );
+            RLock lock = redissonClient.getLock(ARBITRATION_LOCK_KEY_PREFIX + proposalId);
+            try {
+                if (!lock.tryLock(10, 30, SECONDS)) {
+                    log.warn("Arbitration proposal {} locked, skip processing", proposalId);
+                    return;
+                }
 
-                    if (dispute != null) {
-                        dispute.setProposalId(proposalId);
-                        dispute.setProposalTxHash(txHash);
+                DisputeRecordEntity dispute = disputeRecordMapper.selectOne(
+                        new QueryWrapper<DisputeRecordEntity>()
+                                .eq("chain_trade_id", chainTradeId)
+                );
 
-                        dispute.setCompensationAmount(new BigDecimal(compensationAmount));
+                if (dispute != null) {
+                    dispute.setProposalId(proposalId);
+                    dispute.setProposalTxHash(txHash);
+                    dispute.setAccused(accusedAddress);
+                    dispute.setInitiator(dispute.getInitiator());
 
-
-                        // 从链上获取详细的提案信息（包括 deadline）
-                        try {
-                            DisputeDTO chainDetails = multiSigWalletService.getProposalDetails(new BigInteger(proposalId));
-                            if (chainDetails != null && chainDetails.getDeadline() != null) {
-                                dispute.setDeadline(
-                                        chainDetails.getDeadline());
-                            }
-                            // 同步初始票数
+                    try {
+                        DisputeDTO chainDetails = multiSigWalletService.getProposalDetails(new BigInteger(proposalId));
+                        if (chainDetails != null) {
+                            // 直接从链上同步提案状态、票数、截止时间等所有字段
+                            dispute.setProposalStatus(chainDetails.getStatus());
                             dispute.setVoteCount(chainDetails.getVoteCount());
                             dispute.setRejectCount(chainDetails.getRejectCount());
-                        } catch (Exception e) {
-                            log.warn("Failed to fetch proposal details from chain for ID: {}", proposalId, e);
+                            dispute.setCompensationAmount(chainDetails.getCompensationAmount());
+                            dispute.setDeadline(chainDetails.getDeadline());
+                        }
+                    } catch (Exception e) {
+                        log.warn("Failed to fetch proposal details from chain for ID: {}", proposalId, e);
+                    }
+
+                    int updateCount = disputeRecordMapper.updateById(dispute);
+
+                    if (updateCount > 0) {
+                        log.info("Dispute record {} linked to proposal {}", dispute.getId(), proposalId);
+
+                        notificationService.sendSystemNotification(accusedAddress, "仲裁通知",
+                                String.format("您有一笔关于订单 %s 的仲裁提案已提交至仲裁委员会。提案ID: %s。",
+                                        chainTradeId, proposalId));
+
+                        if (dispute.getInitiator() != null) {
+                            notificationService.sendSystemNotification(dispute.getInitiator(), "仲裁进度",
+                                    String.format("您发起的关于订单 %s 的仲裁已进入审理阶段。提案ID: %s。", chainTradeId, proposalId));
                         }
 
-                        disputeRecordMapper.updateById(dispute);
-                        log.info("Dispute record {} linked to proposal {}", dispute.getId(), proposalId);
+                        List<CommitteeMemberEntity> members = committeeMemberMapper.selectList(
+                                new QueryWrapper<CommitteeMemberEntity>().eq("is_active", 1)
+                        );
+
+                        for (CommitteeMemberEntity member : members) {
+                            notificationService.sendSystemNotification(member.getAddress(), "待处理仲裁任务",
+                                    String.format("新的仲裁提案 %s 已创建，涉及订单 %s。请登录后台查看详细信息并进行投票。",
+                                            proposalId, chainTradeId));
+                        }
+
+                        log.info("Arbitration proposal notifications sent for proposal {}", proposalId);
                     } else {
-                        log.warn("No dispute record found for tradeId: {}", tradeId);
+                        log.warn("Failed to update dispute record for proposal {}", proposalId);
                     }
-
-                    // 发送通知给被指控方 (Accused)
-                    notificationService.sendSystemNotification(accusedAddress, "仲裁通知",
-                            String.format("您有一笔关于订单 %s 的仲裁提案已提交至仲裁委员会。提案ID: %s，涉及补偿金额: %s USDT。",
-                                    tradeId, proposalId, compensationAmount));
-
-                    // 发送通知给申诉方 (Victim)
-                    notificationService.sendSystemNotification(victimAddress, "仲裁进度",
-                            String.format("您发起的关于订单 %s 的仲裁已进入审理阶段。提案ID: %s。", tradeId, proposalId));
-
-                    // 发送通知给所有仲裁委员会成员
-                    List<CommitteeMemberEntity> members = committeeMemberMapper.selectList(
-                            new QueryWrapper<CommitteeMemberEntity>().eq("is_active", 1)
-                    );
-
-                    for (CommitteeMemberEntity member : members) {
-                        notificationService.sendSystemNotification(member.getAddress(), "待处理仲裁任务",
-                                String.format("新的仲裁提案 %s 已创建，涉及订单 %s。请登录后台查看详细信息并进行投票。",
-                                        proposalId, tradeId));
-                    }
-
-                } catch (Exception e) {
-                    log.error("Failed to sync arbitration proposal created", e);
+                } else {
+                    log.warn("No dispute record found for tradeId: {}", chainTradeId);
                 }
-            });
+            } finally {
+                if (lock.isHeldByCurrentThread()) {
+                    lock.unlock();
+                }
+            }
         } catch (Exception e) {
             log.error("Error handling ArbitrationProposalCreated event", e);
+            throw new RuntimeException("Failed to process ArbitrationProposalCreated event", e);
         }
     }
+
 
     /**
      * 处理仲裁投票事件
      */
     private void handleArbitrationProposalVotedEvent(Map<String, Object> event) {
         try {
+            String txHash = (String) event.get("txHash");
+
             String proposalId = String.valueOf(event.get("proposalId"));
             String voter = (String) event.get("voter");
             boolean support = Boolean.TRUE.equals(event.get("support"));
@@ -1057,62 +1261,146 @@ public class BlockchainEventListener {
 
             log.info("Processing ArbitrationProposalVoted: proposalId={}", proposalId);
 
-            CompletableFuture.runAsync(() -> {
-                try {
-                    // 从链上获取最新的票数和状态
-                    DisputeDTO details = multiSigWalletService.getProposalDetails(new BigInteger(proposalId));
-
-                    // 更新数据库
-                    DisputeRecordEntity dispute = disputeRecordMapper.selectOne(
-                            new QueryWrapper<DisputeRecordEntity>()
-                                    .eq("proposal_id", proposalId)
-                    );
-
-                    if (dispute != null) {
-                        dispute.setVoteCount(details.getVoteCount());
-                        dispute.setRejectCount(details.getRejectCount());
-                        dispute.setProposalStatus(details.getStatus()); // 状态可能随投票变为 Executed
-                        disputeRecordMapper.updateById(dispute);
-                    }
-
-                    // 3. 发送通知给争议双方
-                    String voteAction = support ? "支持" : "反对";
-                    String content = String.format("仲裁委员会成员 %s 已对您的仲裁提案 %s 投出 %s 票。当前票数 - 赞成: %d, 反对: %d。",
-                            voter, proposalId, voteAction, details.getVoteCount(), details.getRejectCount());
-
-                    // 通知申诉方 (Initiator/Victim)
-                    if (dispute.getInitiator() != null) {
-                        notificationService.sendSystemNotification(dispute.getInitiator(), "仲裁投票进度", content);
-                    }
-
-                    // 通知被指控方 (Accused)
-                    if (dispute.getAccused() != null) {
-                        notificationService.sendSystemNotification(dispute.getAccused(), "仲裁投票进度", content);
-                    }
-
-                } catch (Exception e) {
-                    log.error("Failed to sync arbitration vote", e);
+            RLock lock = redissonClient.getLock(ARBITRATION_LOCK_KEY_PREFIX + proposalId);
+            try {
+                if (!lock.tryLock(10, 30, SECONDS)) {
+                    log.warn("Arbitration proposal {} locked, skip processing", proposalId);
+                    return;
                 }
-            });
+
+                // 直接从链上获取最新的票数和状态
+                MultiSigWalletWrapper.ProposalInfo chainProposal = multiSigWalletWrapper.getProposalDetails(new BigInteger(proposalId));
+
+                // 更新数据库
+                DisputeRecordEntity dispute = disputeRecordMapper.selectOne(
+                        new QueryWrapper<DisputeRecordEntity>()
+                                .eq("proposal_id", proposalId)
+                );
+
+                if (dispute != null) {
+                    dispute.setVoteCount(chainProposal.getVoteCount().intValue());
+                    dispute.setRejectCount(chainProposal.getRejectCount().intValue());
+                    dispute.setProposalStatus(chainProposal.getStatus()); // 状态可能随投票变为 Executed
+
+                    int updateCount = disputeRecordMapper.updateById(dispute);
+
+                    if (updateCount > 0) {
+                        // 发送通知给争议双方
+                        String voteAction = support ? "支持" : "反对";
+                        String content = String.format("仲裁委员会成员 %s 已对您的仲裁提案 %s 投出 %s 票。当前票数 - 赞成: %d, 反对: %d。",
+                                voter, proposalId, voteAction, chainProposal.getVoteCount(), chainProposal.getRejectCount());
+
+                        // 通知申诉方 (Initiator/Victim)
+                        if (dispute.getInitiator() != null) {
+                            notificationService.sendSystemNotification(dispute.getInitiator(), "仲裁投票进度", content);
+                        }
+
+                        // 通知被指控方 (Accused)
+                        if (dispute.getAccused() != null) {
+                            notificationService.sendSystemNotification(dispute.getAccused(), "仲裁投票进度", content);
+                        }
+
+                        log.info("Arbitration vote notifications sent for proposal {}", proposalId);
+                    } else {
+                        log.warn("Failed to update dispute record for proposal {}", proposalId);
+                    }
+                }
+            } finally {
+                if (lock.isHeldByCurrentThread()) {
+                    lock.unlock();
+                }
+            }
         } catch (Exception e) {
             log.error("Error handling ArbitrationProposalVoted event", e);
+            throw new RuntimeException("Failed to process ArbitrationProposalVoted event", e);
         }
     }
+
 
     /**
-     * 处理仲裁提案终结/执行事件
+     * 处理仲裁提案过期事件
      */
-    private void handleArbitrationProposalFinalizedEvent(Map<String, Object> event) {
+    private void handleArbitrationProposalExpiredEvent(Map<String, Object> event) {
         try {
             String proposalId = String.valueOf(event.get("proposalId"));
-            log.info("Processing ArbitrationProposalFinalized: proposalId={}", proposalId);
+            String txHash = (String) event.get("txHash");
 
-            // 逻辑与投票类似，主要是更新最终状态
-            handleArbitrationProposalVotedEvent(event);
+            log.info("Processing ArbitrationProposalExpired: proposalId={}, txHash={}", proposalId, txHash);
+
+            RLock lock = redissonClient.getLock(ARBITRATION_LOCK_KEY_PREFIX + proposalId);
+            try {
+                if (!lock.tryLock(10, 30, SECONDS)) {
+                    log.warn("Arbitration proposal {} locked, skip processing", proposalId);
+                    return;
+                }
+
+                // 从链上获取最新的提案状态和详情
+                MultiSigWalletWrapper.ProposalInfo chainProposal = multiSigWalletWrapper.getProposalDetails(new BigInteger(proposalId));
+
+                // 查找对应的争议记录
+                DisputeRecordEntity dispute = disputeRecordMapper.selectOne(
+                        new QueryWrapper<DisputeRecordEntity>().eq("proposal_id", proposalId)
+                );
+
+                if (dispute != null) {
+                    // 同步链上的最新状态和票数
+                    dispute.setProposalStatus(chainProposal.status);
+                    dispute.setVoteCount(chainProposal.voteCount.intValue());
+                    dispute.setRejectCount(chainProposal.rejectCount.intValue());
+                    dispute.setResolveTime(LocalDateTime.now());
+
+                    String resultMsg = String.format("仲裁提案已过期。投票超时未达成共识，赞成票: %d, 反对票: %d, 交易哈希: %s",
+                            chainProposal.voteCount, chainProposal.rejectCount, txHash);
+                    dispute.setResult(resultMsg);
+
+                    int disputeUpdateCount = disputeRecordMapper.updateById(dispute);
+
+                    // 同步更新关联的交易记录状态 - 从 Exchange 合约获取最新争议状态
+                    boolean tradeUpdated = false;
+                    TradeRecordEntity trade = tradeMapper.selectOne(
+                            new LambdaQueryWrapper<TradeRecordEntity>()
+                                    .eq(TradeRecordEntity::getChainTradeId, chainProposal.tradeId.longValue())
+                    );
+
+                    if (trade != null) {
+                        // 从 Exchange 合约获取最新状态
+                        ExchangeWrapper.TradeInfo chainTradeInfo = exchangeContract.getTradeInfo(chainProposal.tradeId);
+                        trade.setDisputeStatus(chainTradeInfo.disputeStatus.intValue());
+                        int tradeUpdateCount = tradeMapper.updateById(trade);
+                        tradeUpdated = tradeUpdateCount > 0;
+                    }
+
+                    if (disputeUpdateCount > 0) {
+                        // 通知交易双方
+                        String msg = String.format("关于订单 %s 的仲裁提案 %s 已过期，投票时间结束但未达成共识。",
+                                chainProposal.tradeId, proposalId);
+
+                        if (dispute.getInitiator() != null) {
+                            notificationService.sendSystemNotification(dispute.getInitiator(), "仲裁结果通知", msg);
+                        }
+                        if (dispute.getAccused() != null) {
+                            notificationService.sendSystemNotification(dispute.getAccused(), "仲裁结果通知", msg);
+                        }
+
+                        log.info("Arbitration proposal {} expiration synced from chain. Status: {}", proposalId, chainProposal.status);
+                    } else {
+                        log.warn("Failed to update dispute record for expired proposal {}", proposalId);
+                    }
+                } else {
+                    log.warn("No dispute record found for expired proposal: {}", proposalId);
+                }
+            } finally {
+                if (lock.isHeldByCurrentThread()) {
+                    lock.unlock();
+                }
+            }
         } catch (Exception e) {
-            log.error("Error handling ArbitrationProposalFinalized event", e);
+            log.error("Error handling ArbitrationProposalExpired event", e);
+            throw new RuntimeException("Failed to process ArbitrationProposalExpired event", e);
         }
     }
+
+
 
 
     /**
@@ -1120,267 +1408,128 @@ public class BlockchainEventListener {
      */
     private void handleRewardEvent(Map<String, Object> event) {
         try {
+            String txHash = (String) event.get("txHash");
             String user = (String) event.get("user");
             BigInteger amount = new BigInteger((String) event.get("amount"));
-            String tradeId = (String) event.get("tradeId");
+            // 这里的 tradeId 实际上是合约 emit 出来的 chainTradeId
+            String chainTradeIdStr = (String) event.get("tradeId");
+            Long chainTradeId = Long.parseLong(chainTradeIdStr);
 
-            log.info("Processing RewardDistributed: user={}, amount={}, tradeId={}", user, amount, tradeId);
+            log.info("Processing RewardDistributed: user={}, amount={}, chainTradeId={}", user, amount, chainTradeId);
 
-            CompletableFuture.runAsync(() -> {
-                // 1. 更新链上余额
-                userService.updateExthBalanceOnChain(user);
+            RLock lock = redissonClient.getLock(TRADE_LOCK_KEY_PREFIX + chainTradeId);
+            try {
+                if (!lock.tryLock(10, 30, SECONDS)) {
+                    log.warn("Trade {} locked, skip processing", chainTradeId);
+                    return;
+                }
 
-                // 2. 发送通知
-                notificationService.sendSystemNotification(user, "交易奖励到账",
-                        String.format("您在订单 %s 中成功获得 %s EXTH 奖励。", tradeId, amount.toString()));
-            });
+                // 根据链上 ID 查找本地交易记录
+                TradeRecordEntity trade = tradeMapper.selectOne(
+                        new LambdaQueryWrapper<TradeRecordEntity>()
+                                .eq(TradeRecordEntity::getChainTradeId, chainTradeId)
+                );
 
+
+                String displayTradeId = trade.getTradeId();
+                String rewardMsg = String.format("订单 %s 已完成，您获得了 %s EXTH 的交易奖励。", displayTradeId, amount.toString());
+
+                // 通知交易双方
+                notificationService.sendSystemNotification(trade.getPartyA(), "交易奖励到账", rewardMsg);
+                notificationService.sendSystemNotification(trade.getPartyB(), "交易奖励到账", rewardMsg);
+
+                log.info("Reward notifications sent for trade {}", displayTradeId);
+            } finally {
+                if (lock.isHeldByCurrentThread()) {
+                    lock.unlock();
+                }
+            }
         } catch (Exception e) {
             log.error("Failed to process reward event", e);
-        }
-    }
-
-    /**
-     * 发送黑名单通知给用户
-     */
-    private void sendBlacklistNotification(String user, Number timestamp) {
-        try {
-            NotificationDTO notification = new NotificationDTO();
-            notification.setAddress(user);
-            notification.setTitle("用户黑名单通知");
-            notification.setContent("您已被列入黑名单");
-            notification.setType(2);
-            notification.setIsRead(false);
-            notification.setCreateTime(LocalDateTime.now());
-
-            notificationService.sendNotification(notification);
-        } catch (Exception e) {
-            log.error("Failed to send blacklist notification", e);
-        }
-    }
-
-    /**
-     * 发送黑名单通知给管理员
-     */
-    private void notifyAdminAboutBlacklist(String user, String txHash, Number blockNumber, Number timestamp) {
-        try {
-            NotificationDTO notification = new NotificationDTO();
-            notification.setAddress("admin"); // 管理员标识
-            notification.setTitle("管理员通知 - 用户拉黑");
-            notification.setContent(String.format("用户 %s 被合约拉黑，交易哈希：%s", user, txHash));
-            notification.setType(2);
-            notification.setIsRead(false);
-            notification.setCreateTime(LocalDateTime.now());
-
-            notificationService.sendNotification(notification);
-        } catch (Exception e) {
-            log.error("Failed to notify admin about blacklist", e);
+            throw new RuntimeException("Failed to process reward event", e);
         }
     }
 
 
-    /**
-     * 发送到匹配引擎
-     */
-    private void sendToMatchingEngine(String tradeId, String partyA, String partyB, BigInteger amount) {
-        try {
-            Map<String, Object> message = new HashMap<>();
-            message.put("tradeId", tradeId);
-            message.put("partyA", partyA);
-            message.put("partyB", partyB);
-            message.put("amount", amount.toString());
-            message.put("eventType", "TRADE_MATCHED");
-            message.put("timestamp", System.currentTimeMillis());
-
-            // 这里不实际发送，TradeMatchListener 已经监听 TRADE_MATCH 队列
-            // 如果需要发送，需要注入 RabbitTemplate
-            log.debug("Would send to matching engine: tradeId={}", tradeId);
-        } catch (Exception e) {
-            log.error("Failed to send to matching engine", e);
-        }
-    }
-
-
-
-    /**
-     * 更新用户交易统计
-     */
-    private void updateUserTradeStats(String partyA, String partyB) {
-        try {
-            // 增加交易次数
-            userService.incrementTradeCount(partyA);
-            userService.incrementTradeCount(partyB);
-
-            log.debug("User trade stats updated for partyA={}, partyB={}", partyA, partyB);
-        } catch (Exception e) {
-            log.error("Failed to update user trade stats", e);
-        }
-    }
-
-    /**
-     * 发送完成通知
-     */
-    private void sendCompletionNotification(String partyA, String partyB, String tradeId, Number timestamp) {
-        try {
-            Map<String, Object> notification = new HashMap<>();
-            notification.put("type", "trade_completed");
-            notification.put("tradeId", tradeId);
-            notification.put("timestamp", System.currentTimeMillis());
-
-            // 发送 WebSocket 通知（添加 null 检查）
-            String message = objectMapper.writeValueAsString(notification);
-
-            if (partyA != null && !partyA.isEmpty()) {
-                CustomWebSocketHandler.sendToUser(partyA, message);
-                log.debug("Completion notification sent to partyA: {}", partyA);
-            } else {
-                log.warn("PartyA address is null or empty, cannot send WebSocket notification for trade: {}", tradeId);
-            }
-
-            if (partyB != null && !partyB.isEmpty()) {
-                CustomWebSocketHandler.sendToUser(partyB, message);
-                log.debug("Completion notification sent to partyB: {}", partyB);
-            } else {
-                log.warn("PartyB address is null or empty, cannot send WebSocket notification for trade: {}", tradeId);
-            }
-
-            log.debug("Completion notification processing completed for trade {}", tradeId);
-        } catch (Exception e) {
-            log.error("Failed to send completion notification", e);
-        }
-    }
-
-
-    /**
-     * 检查并通知空投领取
-     */
-    private void checkAndNotifyAirdrop(String to, BigInteger value, Number timestamp) {
-        try {
-            // 这个逻辑已经在 handleTransferEvent 中处理了
-            // 如果是空投转账，会在 handleAirdropEvent 中统一处理
-            log.debug("Check airdrop for user: {}, amount: {}", to, value);
-        } catch (Exception e) {
-            log.warn("Failed to check airdrop: {}", e.getMessage());
-        }
-    }
-
-    /**
-     * 发送转账通知
-     * 改进：使用统一的通知服务（自动判断在线/离线）
-     */
-    private void sendTransferNotification(String to, String from, BigInteger value,
-                                          String txHash, Number timestamp) {
-        try {
-            NotificationDTO notification = new NotificationDTO();
-            notification.setAddress(to);
-            notification.setTitle("转账到账通知");
-            notification.setContent(String.format("您收到来自 %s 的 %s 个 EXTH 转账，交易哈希：%s",
-                    from, value.toString(), txHash));
-            notification.setType(0);
-            notification.setIsRead(false);
-            notification.setCreateTime(LocalDateTime.now());
-
-            // ✅ 使用统一的通知服务（会自动判断在线/离线）
-            notificationService.sendNotification(notification);
-
-            log.debug("Transfer notification sent to user {}", to);
-        } catch (Exception e) {
-            log.warn("Failed to send transfer notification: {}", e.getMessage());
-        }
-    }
-
-    /**
-     * 发送交易匹配 WebSocket 通知
-     */
-    private void sendTradeMatchedWebSocket(String partyA, String partyB, String tradeId, BigInteger amount) {
-        try {
-            Map<String, Object> notification = new HashMap<>();
-            notification.put("type", "trade_matched");
-            notification.put("tradeId", tradeId);
-            notification.put("amount", amount.toString());
-            notification.put("timestamp", System.currentTimeMillis());
-
-            String message = objectMapper.writeValueAsString(notification);
-
-            if (partyA != null && !partyA.isEmpty()) {
-                CustomWebSocketHandler.sendToUser(partyA, message);
-                log.debug("Trade matched notification sent to partyA: {}", partyA);
-            } else {
-                log.warn("PartyA address is null or empty, cannot send WebSocket notification");
-            }
-
-            if (partyB != null && !partyB.isEmpty()) {
-                CustomWebSocketHandler.sendToUser(partyB, message);
-                log.debug("Trade matched notification sent to partyB: {}", partyB);
-            } else {
-                log.warn("PartyB address is null or empty, cannot send WebSocket notification");
-            }
-
-            log.info("Trade matched WebSocket notifications sent successfully for trade: {}", tradeId);
-        } catch (Exception e) {
-            log.error("Failed to send trade matched WebSocket notification for trade {}: {}", tradeId, e.getMessage());
-        }
-    }
     /**
      * 处理用户类型升级事件
      */
     private void handleUserUpgradedEvent(Map<String, Object> event) {
         try {
+            String txHash = (String) event.get("txHash");
             String userAddress = (String) event.get("user");
             Object typeObj = event.get("newType");
             int newUserType = typeObj instanceof Number ? ((Number) typeObj).intValue() : Integer.parseInt(typeObj.toString());
 
             log.info("Processing UserUpgraded: user={}, newType={}", userAddress, newUserType);
 
-            CompletableFuture.runAsync(() -> {
-                try {
-                    // 查找或创建用户
-                    UserEntity user = userMapper.selectByAddress(userAddress);
-                    if (user == null) {
-                        user = new UserEntity();
-                        user.setAddress(userAddress);
-                        user.setRegisterTime(LocalDateTime.now());
-                    }
-
-                    int oldType = user.getUserType() != null ? user.getUserType() : -1;
-
-                    // 直接同步链上状态到数据库
-                    user.setUserType(newUserType);
-                    user.setLastActiveTime(LocalDateTime.now());
-                    user.setUpdateTime(LocalDateTime.now());
-
-                    // 根据同步后的最终状态，修正关联字段
-                    if (newUserType == 0) {
-                        // 场景 A: 新用户 (NEW)
-                        // 链上 registerUser 默认给 3 次机会
-                        user.setNewUserTradeCount(3);
-
-                    } else {
-                        // 场景 B & C: 普通用户(NORMAL) 或 种子用户(SEED)
-                        // 只要不是 NEW，链上的 newUserTradeCount 必然为 0
-                        user.setNewUserTradeCount(0);
-                    }
-
-                    // 保存更新
-                    if (user.getId() == null) {
-                        userMapper.insert(user);
-                    } else {
-                        userMapper.updateById(user);
-                    }
-
-                    notificationService.sendUserUpgradeNotification(userAddress, newUserType);
-
-
-                    log.info(" User {} synced from chain: type {} -> {}", userAddress, oldType, newUserType);
-
-                } catch (Exception e) {
-                    log.error("Failed to process UserUpgraded event", e);
+            RLock lock = redissonClient.getLock(USER_LOCK_KEY_PREFIX + userAddress);
+            try {
+                if (!lock.tryLock(10, 30, SECONDS)) {
+                    log.warn("User {} locked, skip processing", userAddress);
+                    return;
                 }
-            });
+
+                // 查找或创建用户
+                UserEntity user = userMapper.selectByAddress(userAddress);
+                boolean isNewUser = false;
+                if (user == null) {
+                    user = new UserEntity();
+                    user.setAddress(userAddress);
+                    user.setRegisterTime(LocalDateTime.now());
+                    isNewUser = true;
+                }
+
+                // 直接同步链上状态到数据库
+                user.setUserType(newUserType);
+                user.setLastActiveTime(LocalDateTime.now());
+                user.setUpdateTime(LocalDateTime.now());
+
+                // 从链上同步 newUserTradeCount，确保与合约状态完全一致
+                try {
+                    ExchangeWrapper.UserInfo chainUserInfo = exchangeContract.getUserInfo(userAddress);
+                    if (chainUserInfo != null && chainUserInfo.newUserTradeCount != null) {
+                        user.setNewUserTradeCount(chainUserInfo.newUserTradeCount.intValue());
+                    }
+                } catch (Exception e) {
+                    log.warn("Failed to sync newUserTradeCount for user: {}", userAddress, e);
+                }
+                try {
+                    BigInteger exthBalance = exthWrapper.balanceOf(userAddress);
+                    user.setExthBalance(fromChainUnit(exthBalance));
+                    log.info("Synced EXTH balance for {}: {}", userAddress, exthBalance);
+                } catch (Exception e) {
+                    log.warn("Failed to get EXTH balance for {}, using 0", userAddress);
+                    if (user.getExthBalance() == null) {
+                        user.setExthBalance(BigDecimal.ZERO);
+                    }
+                }
+
+                // 保存更新并检查结果
+                int updateCount;
+                if (isNewUser) {
+                    updateCount = userMapper.insert(user);
+                } else {
+                    updateCount = userMapper.updateById(user);
+                }
+
+                if (updateCount > 0) {
+                    notificationService.sendUserUpgradeNotification(userAddress, newUserType);
+                    log.info("User {} synced from chain and notification sent: type {}", userAddress, newUserType);
+                } else {
+                    log.warn("Failed to save user {} data", userAddress);
+                }
+            } finally {
+                if (lock.isHeldByCurrentThread()) {
+                    lock.unlock();
+                }
+            }
         } catch (Exception e) {
             log.error("Error handling UserUpgraded event", e);
+            throw new RuntimeException("Failed to process UserUpgraded event", e);
         }
     }
+
 
 
     /**
@@ -1388,39 +1537,58 @@ public class BlockchainEventListener {
      */
     private void handlePartyAConfirmedEvent(Map<String, Object> event) {
         try {
-            String tradeId = String.valueOf(event.get("tradeId"));
+            // 这里的 tradeId 实际上是合约 emit 出来的 chainTradeId
+            String chainTradeIdStr = String.valueOf(event.get("tradeId"));
+            Long chainTradeId = Long.parseLong(chainTradeIdStr);
             String txHash = (String) event.get("txHash");
 
-            log.info("Processing PartyAConfirmed event: tradeId={}, txHash={}", tradeId, txHash);
+            log.info("Processing PartyBConfirmed event: chainTradeId={}, txHash={}", chainTradeId, txHash);
 
-            // 从链上查询最新状态
-            CompletableFuture.runAsync(() -> {
-                try {
-                    ExchangeWrapper.TradeInfo chainInfo = exchangeContract.getTradeInfo(new BigInteger(tradeId));
-
-                    TradeRecordEntity trade = tradeMapper.selectByTradeId(tradeId);
-                    if (trade != null) {
-                        // 使用链上返回的真实状态值
-                        trade.setStatus(chainInfo.state.intValue());
-                        trade.setPartyAConfirmTime(LocalDateTime.now());
-                        tradeMapper.updateById(trade);
-
-                        log.info("Trade {} status synced from chain: state={}", tradeId, chainInfo.state);
-                    }
-
-                    // 通知乙方
-                    TradeRecordEntity updatedTrade = tradeMapper.selectByTradeId(tradeId);
-                    if (updatedTrade != null && updatedTrade.getPartyB() != null) {
-                        notificationService.sendTradeNotification(updatedTrade.getPartyB(), tradeId, "party_a_confirmed");
-                    }
-                } catch (Exception e) {
-                    log.error("Failed to sync PartyAConfirmed state from chain", e);
+            RLock lock = redissonClient.getLock(TRADE_LOCK_KEY_PREFIX + chainTradeId);
+            try {
+                if (!lock.tryLock(10, 30, SECONDS)) {
+                    log.warn("Trade {} locked, skip processing", chainTradeId);
+                    return;
                 }
-            });
+
+                // 根据链上 ID 查找本地记录
+                TradeRecordEntity trade = tradeMapper.selectOne(
+                        new LambdaQueryWrapper<TradeRecordEntity>()
+                                .eq(TradeRecordEntity::getChainTradeId, chainTradeId)
+                );
+
+                if (trade != null) {
+                    // 从链上查询最新状态以同步数据
+                    ExchangeWrapper.TradeInfo chainInfo = exchangeContract.getTradeInfo(BigInteger.valueOf(chainTradeId));
+
+                    // 直接使用链上返回的 state 值
+                    trade.setStatus(chainInfo.state.intValue());
+                    trade.setPartyAConfirmTime(LocalDateTime.now());
+
+                    int updateCount = tradeMapper.updateById(trade);
+
+                    if (updateCount > 0) {
+                        log.info("Trade {} (chainId: {}) status synced from chain and notification sent: state={}", trade.getTradeId(), chainTradeId, chainInfo.state);
+
+                        // 通知乙方（使用本地业务ID展示）
+                        notificationService.sendTradeNotification(trade.getPartyB(), trade.getTradeId(), "party_a_confirmed");
+                    } else {
+                        log.warn("Failed to update trade {} status", trade.getTradeId());
+                    }
+                } else {
+                    log.warn("Local trade record not found for chainTradeId: {}", chainTradeId);
+                }
+            } finally {
+                if (lock.isHeldByCurrentThread()) {
+                    lock.unlock();
+                }
+            }
         } catch (Exception e) {
-            log.error("Failed to process PartyAConfirmed event", e);
+            log.error("Error handling PartyAConfirmed event", e);
+            throw new RuntimeException("Failed to process PartyAConfirmed event", e);
         }
     }
+
 
 
     /**
@@ -1428,127 +1596,496 @@ public class BlockchainEventListener {
      */
     private void handlePartyBConfirmedEvent(Map<String, Object> event) {
         try {
-            String tradeId = String.valueOf(event.get("tradeId"));
+            // 这里的 tradeId 实际上是合约 emit 出来的 chainTradeId
+            String chainTradeIdStr = String.valueOf(event.get("tradeId"));
+            Long chainTradeId = Long.parseLong(chainTradeIdStr);
             String txHash = (String) event.get("txHash");
 
-            log.info("Processing PartyBConfirmed event: tradeId={}, txHash={}", tradeId, txHash);
+            log.info("Processing PartyBConfirmed event: chainTradeId={}, txHash={}", chainTradeId, txHash);
 
-            // 异步从链上查询最新状态
-            CompletableFuture.runAsync(() -> {
-                try {
-                    ExchangeWrapper.TradeInfo chainInfo = exchangeContract.getTradeInfo(new BigInteger(tradeId));
-
-                    TradeRecordEntity trade = tradeMapper.selectByTradeId(tradeId);
-                    if (trade != null) {
-                        // 直接使用链上返回的 state 值
-                        trade.setStatus(chainInfo.state.intValue());
-                        trade.setPartyBConfirmTime(LocalDateTime.now());
-                        tradeMapper.updateById(trade);
-
-                        log.info("Trade {} status synced from chain: state={}", tradeId, chainInfo.state);
-                    }
-
-                    // 通知甲方
-                    TradeRecordEntity updatedTrade = tradeMapper.selectByTradeId(tradeId);
-                    if (updatedTrade != null && updatedTrade.getPartyA() != null) {
-                        notificationService.sendTradeNotification(updatedTrade.getPartyA(), tradeId, "party_b_confirmed");
-                    }
-                } catch (Exception e) {
-                    log.error("Failed to sync PartyBConfirmed state from chain", e);
+            RLock lock = redissonClient.getLock(TRADE_LOCK_KEY_PREFIX + chainTradeId);
+            try {
+                if (!lock.tryLock(10, 30, SECONDS)) {
+                    log.warn("Trade {} locked, skip processing", chainTradeId);
+                    return;
                 }
-            });
+
+                // 根据链上 ID 查找本地记录
+                TradeRecordEntity trade = tradeMapper.selectOne(
+                        new LambdaQueryWrapper<TradeRecordEntity>()
+                                .eq(TradeRecordEntity::getChainTradeId, chainTradeId)
+                );
+
+                if (trade != null) {
+                    // 从链上查询最新状态以同步数据
+                    ExchangeWrapper.TradeInfo chainInfo = exchangeContract.getTradeInfo(BigInteger.valueOf(chainTradeId));
+
+                    // 直接使用链上返回的 state 值
+                    trade.setStatus(chainInfo.state.intValue());
+                    trade.setPartyBConfirmTime(LocalDateTime.now());
+
+                    int updateCount = tradeMapper.updateById(trade);
+
+                    if (updateCount > 0) {
+                        log.info("Trade {} (chainId: {}) status synced from chain and notification sent: state={}", trade.getTradeId(), chainTradeId, chainInfo.state);
+
+                        // 通知甲方（使用本地业务ID展示）
+                        notificationService.sendTradeNotification(trade.getPartyA(), trade.getTradeId(), "party_b_confirmed");
+                    } else {
+                        log.warn("Failed to update trade {} status", trade.getTradeId());
+                    }
+                } else {
+                    log.warn("Local trade record not found for chainTradeId: {}", chainTradeId);
+                }
+            } finally {
+                if (lock.isHeldByCurrentThread()) {
+                    lock.unlock();
+                }
+            }
         } catch (Exception e) {
-            log.error("Failed to process PartyBConfirmed event", e);
+            log.error("Error handling PartyBConfirmed event", e);
+            throw new RuntimeException("Failed to process PartyBConfirmed event", e);
         }
     }
+
+
 
     /**
      * 处理交易取消事件
      */
     private void handleTradeCancelledEvent(Map<String, Object> event) {
         try {
-            String tradeId = String.valueOf(event.get("tradeId"));
+            String txHash = (String) event.get("txHash");
+            // 这里的 tradeId 实际上是合约 emit 出来的 chainTradeId
+            String chainTradeIdStr = String.valueOf(event.get("tradeId"));
+            Long chainTradeId = Long.parseLong(chainTradeIdStr);
 
-            log.info("Processing TradeCancelled event: tradeId={}", tradeId);
+            log.info("Processing TradeCancelled event: chainTradeId={}", chainTradeId);
 
-            // 异步从链上查询最新状态
-            CompletableFuture.runAsync(() -> {
-                try {
-                    ExchangeWrapper.TradeInfo chainInfo = exchangeContract.getTradeInfo(new BigInteger(tradeId));
+            RLock lock = redissonClient.getLock(TRADE_LOCK_KEY_PREFIX + chainTradeId);
+            try {
+                if (!lock.tryLock(10, 30, SECONDS)) {
+                    log.warn("Trade {} locked, skip processing", chainTradeId);
+                    return;
+                }
 
-                    TradeRecordEntity trade = tradeMapper.selectByTradeId(tradeId);
-                    if (trade != null) {
-                        // 使用链上返回的状态值
-                        trade.setStatus(chainInfo.state.intValue());
-                        // 使用链上的完成时间戳
-                        if (chainInfo.completeTime != null && chainInfo.completeTime.longValue() > 0) {
-                            trade.setCompleteTime(
-                                    LocalDateTime.ofEpochSecond(chainInfo.completeTime.longValue(), 0, ZoneOffset.UTC)
-                            );
-                        }
-                        tradeMapper.updateById(trade);
+                // 根据链上 ID 查找本地记录
+                TradeRecordEntity trade = tradeMapper.selectOne(
+                        new LambdaQueryWrapper<TradeRecordEntity>()
+                                .eq(TradeRecordEntity::getChainTradeId, chainTradeId)
+                );
 
-                        log.info("Trade {} status synced from chain: state={}", tradeId, chainInfo.state);
+                if (trade != null) {
+                    // 从链上查询最新状态以同步数据
+                    ExchangeWrapper.TradeInfo chainInfo = exchangeContract.getTradeInfo(BigInteger.valueOf(chainTradeId));
+
+                    // 使用链上返回的状态值
+                    trade.setStatus(chainInfo.state.intValue());
+                    // 使用链上的完成时间戳
+                    if (chainInfo.completeTime != null && chainInfo.completeTime.longValue() > 0) {
+                        trade.setCompleteTime(
+                                LocalDateTime.ofEpochSecond(chainInfo.completeTime.longValue(), 8, ZoneOffset.UTC)
+                        );
                     }
 
-                    // 通知双方
-                    notificationService.sendTradeNotification(trade.getPartyA(), tradeId, "cancelled");
-                    notificationService.sendTradeNotification(trade.getPartyB(), tradeId, "cancelled");
+                    int updateCount = tradeMapper.updateById(trade);
 
+                    if (updateCount > 0) {
+                        log.info("Trade {} (chainId: {}) status synced from chain and notifications sent: state={}", trade.getTradeId(), chainTradeId, chainInfo.state);
 
-                } catch (Exception e) {
-                    log.error("Failed to sync TradeCancelled state from chain", e);
+                        // 通知双方（使用本地业务ID展示）
+                        notificationService.sendTradeNotification(trade.getPartyA(), trade.getTradeId(), "cancelled");
+                        notificationService.sendTradeNotification(trade.getPartyB(), trade.getTradeId(), "cancelled");
+                    } else {
+                        log.warn("Failed to update trade {} status", trade.getTradeId());
+                    }
+                } else {
+                    log.warn("Local trade record not found for chainTradeId: {}", chainTradeId);
                 }
-            });
+            } finally {
+                if (lock.isHeldByCurrentThread()) {
+                    lock.unlock();
+                }
+            }
         } catch (Exception e) {
-            log.error("Failed to process TradeCancelled event", e);
+            log.error("Error handling TradeCancelled event", e);
+            throw new RuntimeException("Failed to process TradeCancelled event", e);
         }
     }
+
+
 
     /**
      * 处理交易争议事件
      */
     private void handleTradeDisputedEvent(Map<String, Object> event) {
         try {
-            String tradeId = String.valueOf(event.get("tradeId"));
+            // 这里的 tradeId 实际上是合约 emit 出来的 chainTradeId
+            String chainTradeIdStr = String.valueOf(event.get("tradeId"));
+            Long chainTradeId = Long.parseLong(chainTradeIdStr);
+
             String disputedParty = (String) event.get("disputedParty");
             String txHash = (String) event.get("txHash");
 
-            log.info("Processing TradeDisputed event: tradeId={}, disputedParty={}", tradeId, disputedParty);
+            log.info("Processing TradeDisputed event: chainTradeId={}, disputedParty={}", chainTradeId, disputedParty);
 
-            // 异步从链上查询最新状态
-            CompletableFuture.runAsync(() -> {
-                try {
-                    ExchangeWrapper.TradeInfo chainInfo = exchangeContract.getTradeInfo(new BigInteger(tradeId));
-
-                    TradeRecordEntity trade = tradeMapper.selectByTradeId(tradeId);
-                    if (trade != null) {
-                        // 直接使用链上返回的状态值（ 5-Disputed）
-                        trade.setStatus(chainInfo.state.intValue());
-                        trade.setDisputedParty(chainInfo.disputedParty);
-                        trade.setDisputeStatus(PENDING); // 处理中
-                        tradeMapper.updateById(trade);
-
-                        log.info(" Trade {} status synced from chain: state={}", tradeId, chainInfo.state);
-                    }
-                    DisputeRecordEntity dispute = disputeRecordMapper.selectById(tradeId);
-                    dispute.setProposalId(tradeId);
-                    dispute.setProposalTxHash(txHash);
-                    dispute.setProposalStatus(PENDING);
-                    dispute.setCreateTime(LocalDateTime.now());
-
-                    // 通知双方
-                    notificationService.sendTradeNotification(trade.getPartyA(), tradeId, "disputed");
-                    notificationService.sendTradeNotification(trade.getPartyB(), tradeId, "disputed");
-                } catch (Exception e) {
-                    log.error("Failed to sync TradeDisputed state from chain", e);
+            RLock lock = redissonClient.getLock(TRADE_LOCK_KEY_PREFIX + chainTradeId);
+            try {
+                if (!lock.tryLock(10, 30, SECONDS)) {
+                    log.warn("Trade {} locked, skip processing", chainTradeId);
+                    return;
                 }
-            });
+
+                // 根据链上 ID 查找本地记录
+                TradeRecordEntity trade = tradeMapper.selectOne(
+                        new LambdaQueryWrapper<TradeRecordEntity>()
+                                .eq(TradeRecordEntity::getChainTradeId, chainTradeId)
+                );
+
+                if (trade != null) {
+                    // 从链上查询最新状态以同步数据
+                    ExchangeWrapper.TradeInfo chainInfo = exchangeContract.getTradeInfo(BigInteger.valueOf(chainTradeId));
+
+                    // 直接使用链上返回的状态值（5-Disputed）
+                    trade.setStatus(chainInfo.state.intValue());
+                    trade.setDisputedParty(chainInfo.disputedParty);
+                    // 从链上同步争议状态
+                    trade.setDisputeStatus(chainInfo.disputeStatus.intValue());
+
+                    int tradeUpdateCount = tradeMapper.updateById(trade);
+
+                    // 更新或创建争议记录（关联本地业务ID）
+                    DisputeRecordEntity dispute = disputeRecordMapper.selectOne(
+                            new QueryWrapper<DisputeRecordEntity>().eq("chain_trade_id", chainTradeId)
+                    );
+
+                    boolean isNewDispute = false;
+                    if (dispute == null) {
+                        dispute = new DisputeRecordEntity();
+                        dispute.setChainTradeId(trade.getChainTradeId().toString());
+
+                        // 根据 disputedParty 判断发起方和被指控方
+                        String disputedPartyAddr = chainInfo.disputedParty != null ? chainInfo.disputedParty.toLowerCase() : "";
+                        String partyAAddr = trade.getPartyA().toLowerCase();
+                        String partyBAddr = trade.getPartyB().toLowerCase();
+
+                        if (disputedPartyAddr.equals(partyAAddr)) {
+                            // A 被指控，B 是发起方
+                            dispute.setInitiator(trade.getPartyB());
+                            dispute.setAccused(trade.getPartyA());
+                        } else if (disputedPartyAddr.equals(partyBAddr)) {
+                            // B 被指控，A 是发起方
+                            dispute.setInitiator(trade.getPartyA());
+                            dispute.setAccused(trade.getPartyB());
+                        } else {
+                            // 默认情况：将非 disputedParty 的一方设为发起方
+                            dispute.setInitiator(trade.getPartyA());
+                            dispute.setAccused(chainInfo.disputedParty != null ? chainInfo.disputedParty : trade.getPartyB());
+                        }
+
+                        // 设置默认争议原因（链上事件没有提供具体原因）
+                        dispute.setReason("用户通过链上交易发起争议，等待仲裁委员会处理");
+                        dispute.setEvidence(txHash != null ? txHash : "N/A");
+
+                        dispute.setCreateTime(LocalDateTime.now());
+                        isNewDispute = true;
+                    }
+
+                    // 保存争议记录
+                    int disputeUpdateCount;
+                    if (isNewDispute) {
+                        disputeUpdateCount = disputeRecordMapper.insert(dispute);
+                    } else {
+                        disputeUpdateCount = disputeRecordMapper.updateById(dispute);
+                    }
+
+                    if (tradeUpdateCount > 0 && disputeUpdateCount > 0) {
+                        log.info("Trade {} (chainId: {}) status synced from chain and notifications sent: state={}, disputeStatus={}",
+                                trade.getTradeId(), chainTradeId, chainInfo.state, chainInfo.disputeStatus);
+
+                        // 通知双方（使用本地业务ID展示）
+                        notificationService.sendTradeNotification(trade.getPartyA(), trade.getTradeId(), "disputed");
+                        notificationService.sendTradeNotification(trade.getPartyB(), trade.getTradeId(), "disputed");
+                    } else {
+                        log.warn("Failed to update trade or dispute record for chainTradeId: {}", chainTradeId);
+                    }
+                } else {
+                    log.warn("Local trade record not found for chainTradeId: {}", chainTradeId);
+                }
+            } finally {
+                if (lock.isHeldByCurrentThread()) {
+                    lock.unlock();
+                }
+            }
         } catch (Exception e) {
-            log.error("Failed to process TradeDisputed event", e);
+            log.error("Error handling TradeDisputed event", e);
+            throw new RuntimeException("Failed to process TradeDisputed event", e);
         }
     }
 
 
+
+    /**
+     * 处理交易过期事件
+     */
+    private void handleTradeExpiredEvent(Map<String, Object> event) {
+        try {
+            String txHash = (String) event.get("txHash");
+            // 这里的 tradeId 实际上是合约 emit 出来的 chainTradeId
+            String chainTradeIdStr = String.valueOf(event.get("tradeId"));
+            Long chainTradeId = Long.parseLong(chainTradeIdStr);
+
+            log.info("Processing TradeExpired event: chainTradeId={}", chainTradeId);
+
+            RLock lock = redissonClient.getLock(TRADE_LOCK_KEY_PREFIX + chainTradeId);
+            try {
+                if (!lock.tryLock(10, 30, SECONDS)) {
+                    log.warn("Trade {} locked, skip processing", chainTradeId);
+                    return;
+                }
+
+                // 根据链上 ID 查找本地记录
+                TradeRecordEntity trade = tradeMapper.selectOne(
+                        new LambdaQueryWrapper<TradeRecordEntity>()
+                                .eq(TradeRecordEntity::getChainTradeId, chainTradeId)
+                );
+
+                if (trade != null) {
+                    // 从链上同步最新状态
+                    ExchangeWrapper.TradeInfo chainInfo = exchangeContract.getTradeInfo(BigInteger.valueOf(chainTradeId));
+                    if (chainInfo != null) {
+                        trade.setStatus(chainInfo.state.intValue());
+                    }
+
+                    int updateCount = tradeMapper.updateById(trade);
+
+                    if (updateCount > 0) {
+                        log.info("Trade {} (chainId: {}) marked as expired in DB and notifications sent.", trade.getTradeId(), chainTradeId);
+
+                        // 通知交易双方（使用本地业务ID展示）
+                        notificationService.sendTradeNotification(trade.getPartyA(), trade.getTradeId(), "expired");
+                        notificationService.sendTradeNotification(trade.getPartyB(), trade.getTradeId(), "expired");
+                    } else {
+                        log.warn("Failed to update trade {} expiration status", trade.getTradeId());
+                    }
+                } else {
+                    log.warn("Local trade record not found for chainTradeId: {}", chainTradeId);
+                }
+            } finally {
+                if (lock.isHeldByCurrentThread()) {
+                    lock.unlock();
+                }
+            }
+        } catch (Exception e) {
+            log.error("Error handling TradeExpired event", e);
+            throw new RuntimeException("Failed to process TradeExpired event", e);
+        }
+    }
+
+
+
+    /**
+     * 处理仲裁提案执行事件
+     */
+    private void handleArbitrationProposalExecutedEvent(Map<String, Object> event) {
+        try {
+            String proposalId = String.valueOf(event.get("proposalId"));
+            String txHash = (String) event.get("txHash");
+
+            log.info("Processing ArbitrationProposalExecuted: proposalId={}, txHash={}", proposalId, txHash);
+
+            RLock lock = redissonClient.getLock(ARBITRATION_LOCK_KEY_PREFIX + proposalId);
+            try {
+                if (!lock.tryLock(10, 30, SECONDS)) {
+                    log.warn("Arbitration proposal {} locked, skip processing", proposalId);
+                    return;
+                }
+
+                // 查找对应的争议记录
+                DisputeRecordEntity dispute = disputeRecordMapper.selectOne(
+                        new QueryWrapper<DisputeRecordEntity>().eq("proposal_id", proposalId)
+                );
+
+                if (dispute != null) {
+                    // 尝试从链上获取最终信息同步
+                    try {
+                        DisputeDTO details = multiSigWalletService.getProposalDetails(new BigInteger(proposalId));
+                        // 同步链上状态 ( Executed)
+                        dispute.setProposalStatus(details.getStatus());
+
+                        dispute.setVoteCount(details.getVoteCount());
+                        dispute.setRejectCount(details.getRejectCount());
+                        dispute.setResolveTime(LocalDateTime.now());
+
+                        // 设置处理结果
+                        String resultMsg = String.format("仲裁裁决已执行。赞成票: %d, 反对票: %d, 赔偿金额: %s USDT, 交易哈希: %s",
+                                details.getVoteCount(), details.getRejectCount(),
+                                dispute.getCompensationAmount() != null ? dispute.getCompensationAmount().toString() : "0",
+                                txHash);
+                        dispute.setResult(resultMsg);
+
+                    } catch (Exception e) {
+                        log.warn("Failed to fetch final details for executed proposal: {}", proposalId, e);
+                    }
+
+                    int disputeUpdateCount = disputeRecordMapper.updateById(dispute);
+
+                    // 同步更新关联的交易记录状态
+                    boolean tradeUpdated = false;
+                    TradeRecordEntity trade = tradeMapper.selectOne(
+                            new LambdaQueryWrapper<TradeRecordEntity>()
+                                    .eq(TradeRecordEntity::getChainTradeId, dispute.getChainTradeId())
+                    );
+
+                    if (trade != null) {
+                        // 调用 exchangeContract.getTradeInfo 来获取 Exchange 合约中该交易的最終状态
+                        try {
+                            ExchangeWrapper.TradeInfo chainTradeInfo = exchangeContract.getTradeInfo(new BigInteger(trade.getTradeId()));
+                            trade.setStatus(chainTradeInfo.state.intValue());
+                            trade.setCompleteTime(
+                                    LocalDateTime.ofEpochSecond(chainTradeInfo.completeTime.longValue(), 8, ZoneOffset.UTC)
+                            );
+                            trade.setDisputeStatus(chainTradeInfo.disputeStatus.intValue());
+
+                            int tradeUpdateCount = tradeMapper.updateById(trade);
+                            tradeUpdated = tradeUpdateCount > 0;
+                        } catch (Exception e) {
+                            log.error("Failed to sync trade info from chain", e);
+                        }
+                    }
+
+                    if (disputeUpdateCount > 0) {
+                        log.info("Arbitration proposal {} executed and synced from chain", proposalId);
+
+                        // 更新交易双方的链上余额
+                        updateOnChainBalance(dispute.getInitiator());
+                        updateOnChainBalance(dispute.getAccused());
+
+                        // 通知交易双方
+                        if (dispute.getInitiator() != null) {
+                            notificationService.sendSystemNotification(dispute.getInitiator(), "仲裁结果通知",
+                                    String.format("关于订单 %s 的仲裁提案 %s 已执行，裁决结果：%s",
+                                            dispute.getChainTradeId(), proposalId, dispute.getResult()));
+                        }
+                        if (dispute.getAccused() != null) {
+                            notificationService.sendSystemNotification(dispute.getAccused(), "仲裁结果通知",
+                                    String.format("关于订单 %s 的仲裁提案 %s 已执行，裁决结果：%s",
+                                            dispute.getChainTradeId(), proposalId, dispute.getResult()));
+                        }
+                    } else {
+                        log.warn("Failed to update dispute record for executed proposal {}", proposalId);
+                    }
+
+                } else {
+                    log.warn("No dispute record found for executed proposal: {}", proposalId);
+                }
+            } finally {
+                if (lock.isHeldByCurrentThread()) {
+                    lock.unlock();
+                }
+            }
+        } catch (Exception e) {
+            log.error("Error handling ArbitrationProposalExecuted event", e);
+            throw new RuntimeException("Failed to process ArbitrationProposalExecuted event", e);
+        }
+    }
+
+
+
+    /**
+     * 处理仲裁提案拒绝事件
+     */
+    private void handleArbitrationProposalRejectedEvent(Map<String, Object> event) {
+        try {
+            String proposalId = String.valueOf(event.get("proposalId"));
+            String txHash = (String) event.get("txHash");
+
+
+            log.info("Processing ArbitrationProposalRejected: proposalId={}, txHash={}", proposalId, txHash);
+
+            RLock lock = redissonClient.getLock(ARBITRATION_LOCK_KEY_PREFIX + proposalId);
+            try {
+                if (!lock.tryLock(10, 30, SECONDS)) {
+                    log.warn("Arbitration proposal {} locked, skip processing", proposalId);
+                    return;
+                }
+
+                // 从链上获取最新的提案状态
+                MultiSigWalletWrapper.ProposalInfo chainProposal = multiSigWalletWrapper.getProposalDetails(new BigInteger(proposalId));
+
+                // 查找对应的争议记录
+                DisputeRecordEntity dispute = disputeRecordMapper.selectOne(
+                        new QueryWrapper<DisputeRecordEntity>().eq("proposal_id", proposalId)
+                );
+
+                if (dispute != null) {
+                    // 从链上同步最新状态和票数
+                    dispute.setProposalStatus(chainProposal.status);
+                    dispute.setVoteCount(chainProposal.voteCount.intValue());
+                    dispute.setRejectCount(chainProposal.rejectCount.intValue());
+                    dispute.setResolveTime(LocalDateTime.now());
+
+                    String resultMsg = String.format("仲裁提案已被拒绝。赞成票: %d, 反对票: %d, 交易哈希: %s",
+                            chainProposal.voteCount, chainProposal.rejectCount, txHash);
+                    dispute.setResult(resultMsg);
+
+                    int disputeUpdateCount = disputeRecordMapper.updateById(dispute);
+
+                    // 同步更新关联的交易记录状态
+                    boolean tradeUpdated = false;
+                    TradeRecordEntity trade = tradeMapper.selectOne(
+                            new LambdaQueryWrapper<TradeRecordEntity>()
+                                    .eq(TradeRecordEntity::getChainTradeId, Long.parseLong(dispute.getChainTradeId()))
+                    );
+
+                    if (trade != null) {
+                        // 从 Exchange 合约获取最新状态
+                        try {
+                            BigInteger chainId = BigInteger.valueOf(trade.getChainTradeId());
+                            ExchangeWrapper.TradeInfo chainTradeInfo = exchangeContract.getTradeInfo(chainId);
+
+                            trade.setStatus(chainTradeInfo.state.intValue());
+                            trade.setCompleteTime(
+                                    LocalDateTime.ofEpochSecond(chainTradeInfo.completeTime.longValue(), 8, ZoneOffset.UTC)
+                            );
+
+                            trade.setDisputeStatus(chainTradeInfo.disputeStatus.intValue());
+
+                            int tradeUpdateCount = tradeMapper.updateById(trade);
+                            tradeUpdated = tradeUpdateCount > 0;
+                        } catch (Exception e) {
+                            log.warn("Failed to fetch trade info from Exchange contract for rejected proposal", e);
+                        }
+                    }
+
+                    if (disputeUpdateCount > 0) {
+                        // 通知交易双方
+                        String msg = String.format("关于订单 %s 的仲裁提案 %s 已被仲裁委员会拒绝。",
+                                dispute.getChainTradeId(), proposalId);
+
+                        if (dispute.getInitiator() != null) {
+                            notificationService.sendSystemNotification(dispute.getInitiator(), "仲裁结果通知", msg);
+                        }
+                        if (dispute.getAccused() != null) {
+                            notificationService.sendSystemNotification(dispute.getAccused(), "仲裁结果通知", msg);
+                        }
+
+                        log.info("Arbitration proposal {} rejection synced and notifications sent.", proposalId);
+                    } else {
+                        log.warn("Failed to update dispute record for rejected proposal {}", proposalId);
+                    }
+                } else {
+                    log.warn("No dispute record found for rejected proposal: {}", proposalId);
+                }
+            } finally {
+                if (lock.isHeldByCurrentThread()) {
+                    lock.unlock();
+                }
+            }
+        } catch (Exception e) {
+            log.error("Error handling ArbitrationProposalRejected event", e);
+            throw new RuntimeException("Failed to process ArbitrationProposalRejected event", e);
+        }
+    }
 
 }

@@ -3,12 +3,15 @@ package com.mnnu.entity;
 import lombok.Data;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
-import com.baomidou.mybatisplus.annotation.TableName;
+import com.baomidou.mybatisplus.annotation.*;
+
 @Data
 @TableName("t_dao_proposal_record")
 public class ProposalRecordEntity {
+    @TableId(type = IdType.AUTO)
     private Long id;
-    private String proposalId;        // 链上ID
+
+    private String proposalId;
     private String txHash;
     private String description;
     private String proposer;
@@ -21,6 +24,6 @@ public class ProposalRecordEntity {
     private BigDecimal yesVotes = BigDecimal.ZERO;
     private BigDecimal noVotes = BigDecimal.ZERO;
     private Long deadline;
+
     private LocalDateTime createdAt;
-    private LocalDateTime updatedAt;
 }

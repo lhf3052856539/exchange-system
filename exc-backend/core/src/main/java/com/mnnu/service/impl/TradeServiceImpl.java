@@ -16,39 +16,47 @@ import com.mnnu.mapper.DisputeRecordMapper;
 import com.mnnu.mapper.TradeMapper;
 import com.mnnu.mapper.UserMapper;
 import com.mnnu.service.*;
-import lombok.RequiredArgsConstructor;
+import com.mnnu.wrapper.ExchangeWrapper;
 import lombok.extern.slf4j.Slf4j;
 import org.redisson.api.RLock;
 import org.redisson.api.RedissonClient;
-import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.util.List;
-import java.util.UUID;
-import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
+
+import static com.mnnu.constant.SystemConstants.RedisKey.TRADE_LOCK_KEY_PREFIX;
+import static java.util.concurrent.TimeUnit.SECONDS;
 
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class TradeServiceImpl implements TradeService {
-
-    private final TradeMapper tradeMapper;
-    private final DisputeRecordMapper disputeMapper;
-    private final UserMapper userMapper;
-    private final UserService userService;
-    private final RateService rateService;
-    private final MatchingEngineService matchingEngine;
-    private final NotificationServiceImpl notificationService;
+    @Autowired
+    private TradeMapper tradeMapper;
+    @Autowired
+    private DisputeRecordMapper disputeMapper;
+    @Autowired
+    private UserMapper userMapper;
+    @Autowired
+    private UserService userService;
+    @Autowired
+    private RateService rateService;
+    @Autowired
+    private MatchingEngineService matchingEngine;
     @Autowired
     @Lazy
     private BlockchainService blockchainService;
-    private final RedissonClient redissonClient;
-    private final RabbitTemplate rabbitTemplate;
+    @Autowired
+    private RedissonClient redissonClient;
+
+    @Autowired
+    private ExchangeWrapper exchangeWrapper;
 
     /**
      * 请求匹配
@@ -125,31 +133,30 @@ public class TradeServiceImpl implements TradeService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public TradeDTO createTradePair(TradeMatchDTO match) {
-        // 生成交易 ID
-        String tradeId = generateTradeId();
 
-        // 获取汇率
+        Long tradeId = generateTradeId();
+
         BigDecimal rate = match.getExchangeRate();
         if (rate == null) {
             rate = rateService.calculateExchangeAmount(BigDecimal.ONE,
                     match.getFromCurrency(), match.getToCurrency());
         }
 
-        // 计算双方需转账金额（1 UT = 100 USD）
-        // match.getAmount() 是 UT 数量，需要转换为 USD
-        BigDecimal usdValue = BigDecimal.valueOf(match.getAmount()).multiply(new BigDecimal("100"));
+        BigDecimal utValue = BigDecimal.valueOf(match.getAmount());
 
-        // A 方转出金额：根据 fromCurrency → toCurrency 的汇率计算
-        BigDecimal amountA = usdValue.multiply(rate);  // A 转出 fromCurrency
-        BigDecimal amountB = usdValue;                  // B 转出 toCurrency（等值 USD）
+        BigDecimal usdValue = utValue.multiply(new BigDecimal("100"));
+
+        BigDecimal amountA = usdValue.multiply(rate);
+        BigDecimal amountB = usdValue;
+
+        BigDecimal feeAmount = usdValue.divide(new BigDecimal("10000"), 6, BigDecimal.ROUND_HALF_UP);
 
 
-        // 创建交易记录
         TradeRecordEntity trade = new TradeRecordEntity();
-        trade.setTradeId(tradeId);
+        trade.setTradeId(String.valueOf(tradeId));
         trade.setPartyA(match.getPartyA());
         trade.setPartyB(match.getPartyB());
-        trade.setAmount(usdValue);
+        trade.setAmount(utValue);
         trade.setAmountA(amountA);
         trade.setAmountB(amountB);
         trade.setFromCurrency(match.getFromCurrency());
@@ -157,11 +164,18 @@ public class TradeServiceImpl implements TradeService {
         trade.setExchangeRate(rate);
         trade.setPartyAType(getUserType(match.getPartyA()));
         trade.setPartyBType(getUserType(match.getPartyB()));
-        trade.setStatus(SystemConstants.TradeStatus.PENDING_CHAIN_COMPLETE);
+        trade.setFeeAmount(feeAmount);
+        trade.setExthReward(BigDecimal.ZERO);
+        trade.setMatchTime(LocalDateTime.now());
+        trade.setExpireTime(LocalDateTime.now(ZoneId.of("Asia/Shanghai")).plusHours(24));
+        trade.setStatus(SystemConstants.TradeStatus
+                .WAITING_PARTY_B_CREATE_PAIR);
+        trade.setDisputeStatus(SystemConstants.DisputeStatus.NO_DISPUTE);
 
         tradeMapper.insert(trade);
 
-        log.info("Trade inserted into database with id={}", trade.getId());
+        log.info("Trade inserted into database with id={}, utValue={}, usdValue={}, feeAmount={}",
+                trade.getId(), utValue, usdValue, feeAmount);
 
         return convertToDTO(trade);
     }
@@ -173,9 +187,9 @@ public class TradeServiceImpl implements TradeService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public TradeDTO confirmPartyA(String address, String tradeId, String txHash) {
-        RLock lock = redissonClient.getLock("trade:lock:" + tradeId);
+        RLock lock = redissonClient.getLock(TRADE_LOCK_KEY_PREFIX + tradeId);
         try {
-            if (!lock.tryLock(10, 30, TimeUnit.SECONDS)) {
+            if (!lock.tryLock(10, 30, SECONDS)) {
                 throw new BusinessException("System busy, try again");
             }
 
@@ -194,8 +208,13 @@ public class TradeServiceImpl implements TradeService {
                 throw new BusinessException("Trade status is not matched");
             }
             if (LocalDateTime.now().isAfter(trade.getExpireTime())) {
-                trade.setStatus(SystemConstants.TradeStatus.DISPUTED);
-                tradeMapper.updateById(trade);
+                trade.setStatus(SystemConstants.TradeStatus.PENDING_CHAIN_COMPLETE);
+                try {
+                    exchangeWrapper.expireTrade(BigInteger.valueOf(trade.getChainTradeId()));
+                } catch (Exception e) {
+                    log.error("Failed to call expireTrade on chain", e);
+                    throw new BusinessException("Failed to process expired trade on chain");
+                }
                 throw new BusinessException("Trade expired");
             }
 
@@ -230,9 +249,9 @@ public class TradeServiceImpl implements TradeService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public TradeDTO confirmPartyB(String address, String tradeId, String txHash) {
-        RLock lock = redissonClient.getLock("trade:lock:" + tradeId);
+        RLock lock = redissonClient.getLock(TRADE_LOCK_KEY_PREFIX + tradeId);
         try {
-            if (!lock.tryLock(10, 30, TimeUnit.SECONDS)) {
+            if (!lock.tryLock(10, 30, SECONDS)) {
                 throw new BusinessException("System busy, try again");
             }
 
@@ -250,8 +269,13 @@ public class TradeServiceImpl implements TradeService {
             }
 
             if (LocalDateTime.now().isAfter(trade.getExpireTime())) {
-                trade.setStatus(SystemConstants.TradeStatus.DISPUTED);
-                tradeMapper.updateById(trade);
+                trade.setStatus(SystemConstants.TradeStatus.PENDING_CHAIN_COMPLETE);
+                try {
+                    exchangeWrapper.expireTrade(BigInteger.valueOf(trade.getChainTradeId()));
+                } catch (Exception e) {
+                    log.error("Failed to call expireTrade on chain", e);
+                    throw new BusinessException("Failed to process expired trade on chain");
+                }
                 throw new BusinessException("Trade expired");
             }
 
@@ -288,7 +312,7 @@ public class TradeServiceImpl implements TradeService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public TradeDTO finalConfirmPartyA(String address, String tradeId) {
-        RLock lock = redissonClient.getLock("trade:lock:" + tradeId);
+        RLock lock = redissonClient.getLock(TRADE_LOCK_KEY_PREFIX + tradeId);
         try {
             lock.lock();
 
@@ -307,8 +331,13 @@ public class TradeServiceImpl implements TradeService {
                 throw new BusinessException("Trade is not ready to be completed. Current status: " + trade.getStatus());
             }
             if (LocalDateTime.now().isAfter(trade.getExpireTime())) {
-                trade.setStatus(SystemConstants.TradeStatus.DISPUTED);
-                tradeMapper.updateById(trade);
+                trade.setStatus(SystemConstants.TradeStatus.PENDING_CHAIN_COMPLETE);
+                try {
+                    exchangeWrapper.expireTrade(BigInteger.valueOf(trade.getChainTradeId()));
+                } catch (Exception e) {
+                    log.error("Failed to call expireTrade on chain", e);
+                    throw new BusinessException("Failed to process expired trade on chain");
+                }
                 throw new BusinessException("Trade expired");
             }
 
@@ -335,9 +364,9 @@ public class TradeServiceImpl implements TradeService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public TradeDTO cancelTrade(String address, String tradeId) {
-        RLock lock = redissonClient.getLock("trade:lock:" + tradeId);
+        RLock lock = redissonClient.getLock(TRADE_LOCK_KEY_PREFIX + tradeId);
         try {
-            if (!lock.tryLock(10, 30, TimeUnit.SECONDS)) {
+            if (!lock.tryLock(10, 30, SECONDS)) {
                 throw new BusinessException("System busy, try again");
             }
 
@@ -389,50 +418,71 @@ public class TradeServiceImpl implements TradeService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public DisputeDTO disputeTrade(String address, DisputeParam param) {
-        TradeRecordEntity trade = tradeMapper.selectByTradeId(param.getTradeId());
-        if (trade == null) {
-            throw new BusinessException("Trade not found");
+        RLock lock = redissonClient.getLock(TRADE_LOCK_KEY_PREFIX + param.getChainTradeId());
+        try {
+            if (!lock.tryLock(10, 30, SECONDS)) {
+                throw new BusinessException("System busy, try again");
+            }
+
+            Long chainTradeId = Long.valueOf(param.getChainTradeId());
+            log.info("🔍 getTradeDetail called with tradeId: {}", chainTradeId);
+
+            TradeRecordEntity trade = tradeMapper.selectOne(
+                    new LambdaQueryWrapper<TradeRecordEntity>()
+                            .eq(TradeRecordEntity::getChainTradeId, chainTradeId)
+            );
+            if (trade == null) {
+                throw new BusinessException("Trade not found");
+            }
+
+            // 验证发起方是交易参与方
+            if (!trade.getPartyA().equals(address) && !trade.getPartyB().equals(address)) {
+                throw new BusinessException("Not a party to this trade");
+            }
+
+            // 验证交易状态
+            if (trade.getStatus() == SystemConstants.TradeStatus.COMPLETED) {
+                throw new BusinessException("Cannot dispute completed trade");
+            }
+
+
+            if (trade.getStatus() == SystemConstants.TradeStatus.DISPUTED) {
+                throw new BusinessException("Dispute already submit");
+            }
+
+            if (trade.getStatus() == SystemConstants.TradeStatus.RESOLVED) {
+                throw new BusinessException("Dispute already resolve");
+            }
+
+            // 确定被争议方
+            String accused = trade.getPartyA().equals(address) ? trade.getPartyB() : trade.getPartyA();
+
+            trade.setStatus(SystemConstants.TradeStatus.PENDING_CHAIN_COMPLETE);
+            trade.setDisputeStatus(SystemConstants.DisputeStatus.PENDING);
+            tradeMapper.updateById(trade);
+
+            // 创建争议记录（链下）
+            DisputeRecordEntity dispute = new DisputeRecordEntity();
+            dispute.setChainTradeId(param.getChainTradeId());
+            dispute.setInitiator(address);
+            dispute.setAccused(accused);
+            dispute.setReason(param.getReason());
+            dispute.setEvidence(param.getEvidence());
+            dispute.setProposalStatus(SystemConstants.ProposalStatus.PENDING_SUBMIT);
+
+            disputeMapper.insert(dispute);
+
+
+            return convertToDisputeDTO(dispute);
+
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new BusinessException("Operation interrupted");
+        } finally {
+            if (lock.isHeldByCurrentThread()) {
+                lock.unlock();
+            }
         }
-
-        // 验证发起方是交易参与方
-        if (!trade.getPartyA().equals(address) && !trade.getPartyB().equals(address)) {
-            throw new BusinessException("Not a party to this trade");
-        }
-
-        // 验证交易状态
-        if (trade.getStatus() == SystemConstants.TradeStatus.COMPLETED) {
-            throw new BusinessException("Cannot dispute completed trade");
-        }
-
-
-        if (trade.getStatus() == SystemConstants.TradeStatus.DISPUTED) {
-            throw new BusinessException("Dispute already submit");
-        }
-
-        if (trade.getStatus() == SystemConstants.TradeStatus.RESOLVED) {
-            throw new BusinessException("Dispute already resolve");
-        }
-
-        // 确定被争议方
-        String accused = trade.getPartyA().equals(address) ? trade.getPartyB() : trade.getPartyA();
-
-        trade.setStatus(SystemConstants.TradeStatus.PENDING_CHAIN_COMPLETE);
-        trade.setDisputeStatus(SystemConstants.DisputeStatus.PENDING_CHAIN_COMPLETE);
-        tradeMapper.updateById(trade);
-
-        // 创建争议记录（链下）
-        DisputeRecordEntity dispute = new DisputeRecordEntity();
-        dispute.setTradeId(param.getTradeId());
-        dispute.setInitiator(address);
-        dispute.setAccused(accused);
-        dispute.setReason(param.getReason());
-        dispute.setEvidence(param.getEvidence());
-        dispute.setProposalStatus(SystemConstants.DisputeStatus.PENDING_CHAIN_COMPLETE);
-
-        disputeMapper.insert(dispute);
-
-
-        return convertToDisputeDTO(dispute);
     }
 
     /**
@@ -447,10 +497,6 @@ public class TradeServiceImpl implements TradeService {
             throw new BusinessException("Dispute not found");
         }
 
-        // 更新争议状态（链下）
-        dispute.setProposalStatus(SystemConstants.DisputeStatus.PENDING_CHAIN_COMPLETE);
-        disputeMapper.updateById(dispute);
-
         return convertToDisputeDTO(dispute);
     }
 
@@ -461,15 +507,28 @@ public class TradeServiceImpl implements TradeService {
      */
     @Override
     public TradeDTO getTradeDetail(String tradeId) {
+        log.info("🔍 getTradeDetail called with tradeId: {}", tradeId);
 
-        TradeRecordEntity trade = tradeMapper.selectByTradeId(tradeId);
+        TradeRecordEntity trade = tradeMapper.selectOne(
+                new LambdaQueryWrapper<TradeRecordEntity>()
+                        .eq(TradeRecordEntity::getTradeId, tradeId)
+                        .or()
+                        .eq(TradeRecordEntity::getChainTradeId, tradeId)
+        );
+
         if (trade == null) {
+            log.error("❌ Trade not found for tradeId/chainTradeId: {}", tradeId);
             throw new BusinessException("Trade not found");
         }
+
+        log.info("✅ Trade found: tradeId={}, chainTradeId={}, status={}",
+                trade.getTradeId(), trade.getChainTradeId(), trade.getStatus());
+
         TradeDTO dto = convertToDTO(trade);
 
         return dto;
     }
+
 
     /**
      * 获取用户交易列表
@@ -502,6 +561,7 @@ public class TradeServiceImpl implements TradeService {
      * 检查过期交易
      */
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public void checkExpiredTrades() {
         LocalDateTime now = LocalDateTime.now();
 
@@ -514,23 +574,23 @@ public class TradeServiceImpl implements TradeService {
         List<TradeRecordEntity> expiredTrades = tradeMapper.selectList(wrapper);
 
         for (TradeRecordEntity trade : expiredTrades) {
-            trade.setStatus(SystemConstants.TradeStatus.DISPUTED);
-            tradeMapper.updateById(trade);
-
-            log.info("Trade expired: {}", trade.getTradeId());
-
-            // 发送通知
-            notificationService.sendTradeNotification(trade.getPartyA(), trade.getTradeId(), "expired");
-            notificationService.sendTradeNotification(trade.getPartyB(), trade.getTradeId(), "expired");
+            try {
+                    log.info("Triggering on-chain expire for trade: {}, chainId: {}", trade.getTradeId(), trade.getChainTradeId());
+                    // 调用链上函数标记过期
+                    exchangeWrapper.expireTrade(BigInteger.valueOf(trade.getChainTradeId()));
+            } catch (Exception e) {
+                log.error("Failed to process expired trade: {}", trade.getTradeId(), e);
+            }
         }
-
     }
+
+
 
     /**
      * 生成交易ID
      */
-    private String generateTradeId() {
-        return "T" + System.currentTimeMillis() + UUID.randomUUID().toString().substring(0, 8);
+    private long generateTradeId() {
+        return System.currentTimeMillis();
     }
 
     /**
@@ -577,14 +637,14 @@ public class TradeServiceImpl implements TradeService {
      */
     private String getTradeStatusDesc(int status) {
         switch (status) {
-            case 0: return "等待匹配";
-            case 1: return "已匹配";
-            case 2: return "A方已转账";
-            case 3: return "B方已确认";
-            case 4: return "已完成";
-            case 5: return "争议中";
-            case 6: return "争议解决";
-            case 7: return "交易取消";
+            case 0: return "交易已创建，等待率先转账方确认转账";
+            case 1: return "等待履约方确认转账";
+            case 2: return "等待率先转账方最终确认";
+            case 3: return "交易已完成";
+            case 4: return "交易已取消";
+            case 5: return "交易存在争议";
+            case 6: return "交易争议已解决";
+            case 7: return "交易已过期";
             case 8: return "等待链上确认";
             default: return "未知";
         }
@@ -598,7 +658,7 @@ public class TradeServiceImpl implements TradeService {
 
         DisputeDTO dto = new DisputeDTO();
         dto.setId(entity.getId());
-        dto.setTradeId(entity.getTradeId());
+        dto.setChainTradeId(entity.getChainTradeId());
         dto.setInitiator(entity.getInitiator());
         dto.setAccused(entity.getAccused());
         dto.setReason(entity.getReason());
@@ -617,10 +677,11 @@ public class TradeServiceImpl implements TradeService {
      */
     private String getDisputeStatusDesc(int status) {
         switch (status) {
-            case 0: return "等待链上确认";
-            case 1: return "处理中";
-            case 2: return "已解决";
-            case 3: return "已驳回";
+            case 0: return "无争议";
+            case 1: return "争议处理中";
+            case 2: return "争议请求已执行";
+            case 3: return "争议请求已驳回";
+            case 4: return "争议已过期";
             default: return "未知";
         }
     }

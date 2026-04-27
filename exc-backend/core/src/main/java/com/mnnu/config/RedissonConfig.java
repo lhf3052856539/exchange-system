@@ -46,11 +46,16 @@ public class RedissonConfig {
         String address = String.format("redis://%s:%d", host, port);
         config.useSingleServer()
                 .setAddress(address)
-                .setDatabase(database);
-
-        if (password != null && !password.isEmpty()) {
-            config.useSingleServer().setPassword(password);
-        }
+                .setDatabase(database)
+                .setPassword(password != null && !password.isEmpty() ? password : null)
+                .setConnectionPoolSize(64)
+                .setConnectionMinimumIdleSize(10)
+                .setIdleConnectionTimeout(10000)
+                .setConnectTimeout(10000)
+                .setTimeout(3000)
+                .setRetryAttempts(3)
+                .setRetryInterval(1500)
+                .setSubscriptionConnectionPoolSize(50);
 
         return Redisson.create(config);
     }

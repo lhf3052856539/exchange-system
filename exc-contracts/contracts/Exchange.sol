@@ -31,6 +31,10 @@ contract Exchange is Ownable, ReentrancyGuard {
     uint256 public constant MIN_UT = 1; // 1 UT = 100 USD
     uint256 public constant MAX_UT = 70; // 70 UT
 
+    uint256 public constant TRADE_TIMEOUT_SECONDS = 18000; // 交易超时时间（5小时）
+
+
+
     // 用户类型枚举
     enum UserType { NEW, NORMAL, SEED }
 
@@ -51,8 +55,10 @@ contract Exchange is Ownable, ReentrancyGuard {
         uint256 feeAmount; // 手续费金额（EXTH）
         uint256 createTime; //交易创建时的区块时间
         uint256 completeTime; // 记录完成或解决争议的时间
-        // 0: Created, 1: PartyA Confirmed, 2: PartyB Confirmed, 3: Completed, 4: Cancell,5:dispute,6:Resolved
+        // 0: Created, 1: PartyA Confirmed, 2: PartyB Confirmed, 3: Completed, 4: Cancell,5:dispute,6:Resolved,7:expired
         uint8 state;
+        // 争议状态: 0: 无争议, 1: 争议处理中, 2: 争议请求已执行, 3: 争议请求已驳回, 4: 争议已过期
+        uint8 disputeStatus;
         address disputedParty; // 被争议方
     }
 
@@ -74,18 +80,18 @@ contract Exchange is Ownable, ReentrancyGuard {
 
     // 事件
     event UserUpgraded(address indexed user, UserType newType);
-    event TradeMatched(uint256 indexed tradeId, address indexed partyA, address indexed partyB, uint256 amount);
+    event TradeCreate(uint256 indexed chainTradeId,uint256 indexed tradeId, address indexed partyA, address partyB, uint256 amount);
     event TradeCompleted(uint256 indexed tradeId);
     event TradeDisputed(uint256 indexed tradeId, address indexed disputedParty);
     event UserBlacklisted(address indexed user);
     event RewardUpdated(uint256 newReward, uint256 totalUTVolume);
-    event MatchRequested(bytes32 indexed requestId, address indexed user, uint256 amount, uint256 timestamp);
     event FeeCollected(uint256 indexed tradeId, address indexed feePayerA,address indexed feePayerB, uint256 feeAmount);
     event DisputeSubmittedToArbitration(uint256 indexed tradeId, address indexed initiator, address indexed accusedParty);
     event PartyAConfirmed(uint256 indexed tradeId,address indexed party,string txHash);
     event PartyBConfirmed(uint256 indexed tradeId,address indexed party,string txHash);
     event TradeCancelled(uint256 indexed tradeId);
     event TradeResolved(uint256 indexed tradeId);
+    event TradeExpired(uint256 indexed tradeId);
     // ==================== 修饰器 ====================
 
     modifier notBlacklisted(address user) {
@@ -206,23 +212,6 @@ contract Exchange is Ownable, ReentrancyGuard {
 
     // ==================== 交易匹配函数 ====================
 
-    /**
-     * @notice 请求交易匹配
-     * @dev 后端实现实际的匹配逻辑，合约只记录匹配结果
-     * @param amount 交易金额（UT）
-     */
-    function requestMatch(uint256 amount) external notBlacklisted(msg.sender) nonReentrant {
-        require(amount >= MIN_UT && amount <= MAX_UT, unicode"金额无效！");
-        require(amount <= getTradeableUT(msg.sender), unicode"金额超出交易限制！");
-
-        // 生成请求哈希
-        bytes32 requestId = keccak256(abi.encodePacked(msg.sender, amount, block.timestamp));
-
-        // 触发事件让后端监听
-        emit MatchRequested(requestId, msg.sender, amount, block.timestamp);
-        emit TradeMatched(0, address(0), msg.sender, amount); // 注：tradeId 为 0 表示等待匹配
-
-    }
 
     /**
      * @notice 创建交易对（由后端调用）
@@ -235,17 +224,18 @@ contract Exchange is Ownable, ReentrancyGuard {
         address partyA,
         address partyB,
         uint256 amount,
-        uint256 _feeAmount  // 手续费
+        uint256 feeAmount,  // 手续费
+        uint256 tradeId
     ) external  notBlacklisted(partyA) notBlacklisted(partyB) returns (uint256) {
 
         // 简化：不再检查用户类型和新手次数，完全信任后端传入的参数
         // 后端已经决定了谁是 partyA（率先转账方）
 
-        // 🔥 计算当前奖励（根据总交易量减半）
+        // 计算当前奖励（根据总交易量减半）
         _checkRewardHalving();
 
-        // 🔥 根据交易量动态计算奖励：每 1UT 奖励 currentReward（0.05 EXTH）
-        uint256 reward = amount * currentReward;
+        // 根据交易量动态计算奖励：每 1UT 奖励 currentReward（0.05 EXTH）
+        uint256 reward = (amount * currentReward) / 10**6;
 
         // 创建交易对
         tradePairCounter++;
@@ -254,14 +244,15 @@ contract Exchange is Ownable, ReentrancyGuard {
         partyB: partyB,
         amount: amount,
         exthReward: reward, // 使用动态计算的奖励
-        feeAmount: _feeAmount, // 手续费
+        feeAmount: feeAmount, // 手续费
         createTime: block.timestamp,
         completeTime: 0,
         state: 0,
+        disputeStatus: 0,
         disputedParty: address(0)
         });
 
-        emit TradeMatched(tradePairCounter, partyA, partyB, amount);
+        emit TradeCreate(tradePairCounter, tradeId, partyA, partyB, amount);
 
         return tradePairCounter;
     }
@@ -269,7 +260,7 @@ contract Exchange is Ownable, ReentrancyGuard {
         TradePair storage trade = tradePairs[tradeId];
         require(msg.sender == trade.partyA, "Not party A");
         require(trade.state == 0, "Invalid state or already confirmed"); // 只有 state 为 0 才能确认
-        require(block.timestamp <= trade.createTime + 18000, "Trade expired");
+        require(block.timestamp <= trade.createTime + TRADE_TIMEOUT_SECONDS, "Trade expired");
 
         trade.state = 1; // Update state to PartyA Confirmed
 
@@ -279,7 +270,7 @@ contract Exchange is Ownable, ReentrancyGuard {
         TradePair storage trade = tradePairs[tradeId];
         require(msg.sender == trade.partyB, "Not party B");
         require(trade.state == 1, "Waiting for Party A confirmation"); // 只有 state 为 1 才能确认
-        require(block.timestamp <= trade.createTime + 18000, "Trade expired");
+        require(block.timestamp <= trade.createTime + TRADE_TIMEOUT_SECONDS, "Trade expired");
 
         trade.state = 2; // Update state to PartyB Confirmed
 
@@ -291,7 +282,7 @@ contract Exchange is Ownable, ReentrancyGuard {
         TradePair storage trade = tradePairs[tradeId];
         require(msg.sender == trade.partyA || msg.sender == trade.partyB, "Not authorized");
         require(trade.state < 3, "Trade already completed");
-        require(block.timestamp <= trade.createTime + 18000, "Trade expired");
+        require(block.timestamp <= trade.createTime + TRADE_TIMEOUT_SECONDS, "Trade expired");
 
         trade.state = 4; // Cancelled
         trade.completeTime = block.timestamp;
@@ -343,7 +334,7 @@ contract Exchange is Ownable, ReentrancyGuard {
      * @param tradeId 交易 ID
      * @param feeAmount 手续费金额（EXTH）
      */
-    function _collectFee(uint256 tradeId, uint256 feeAmount) internal nonReentrant {
+    function _collectFee(uint256 tradeId, uint256 feeAmount) internal {
         TradePair storage trade = tradePairs[tradeId];
 
         // 从 partyA（率先转账方）收取手续费
@@ -372,6 +363,22 @@ contract Exchange is Ownable, ReentrancyGuard {
     function _distributeReward(address user, uint256 reward) internal {
         require(address(treasure) != address(0), "Treasure not set");
         treasure.withdrawERC20(address(exthToken), user, reward);
+    }
+
+    /**
+     * @notice 标记交易为过期状态
+     * @dev 当交易创建超过 18000 秒（5小时）后，任何人均可调用此函数将状态置为过期
+     * @param tradeId 交易 ID
+     */
+    function expireTrade(uint256 tradeId) external {
+        TradePair storage trade = tradePairs[tradeId];
+        require(trade.state < 3, "Trade already finished"); // 只有未完成的状态才能过期
+        require(block.timestamp > trade.createTime + TRADE_TIMEOUT_SECONDS, "Trade not yet expired");
+
+        trade.state = 7; // Expired
+        trade.completeTime = block.timestamp;
+
+        emit TradeExpired(tradeId);
     }
 
     /**
@@ -432,7 +439,10 @@ contract Exchange is Ownable, ReentrancyGuard {
         require(trade.state < 3, "Trade already finished");
         require(trade.state != 5, "Already disputed");
 
+        trade.disputedParty = disputedParty;
+
         trade.state = 5;
+        trade.disputeStatus = 1;
 
         emit TradeDisputed(tradeId, disputedParty);
 
@@ -464,9 +474,11 @@ contract Exchange is Ownable, ReentrancyGuard {
     }
 
     // 只有白名单地址能调用
-    function markTradeAsResolved(uint256 tradeId) external onlyAuthorized {
-        require(tradePairs[tradeId].state == 5, "Not in dispute");
+    function markTradeAsResolved(uint256 tradeId, uint8 newDisputeStatus) external onlyAuthorized {
+        require(tradePairs[tradeId].state == 5, "Trade not in dispute");
+        require(newDisputeStatus <= 4, "Invalid dispute status");
         tradePairs[tradeId].state = 6; // 标记为已解决
+        tradePairs[tradeId].disputeStatus = newDisputeStatus;
         tradePairs[tradeId].completeTime = block.timestamp;
         emit TradeResolved(tradeId);
     }
@@ -526,6 +538,7 @@ contract Exchange is Ownable, ReentrancyGuard {
         uint256 exthReward,
         uint256 feeAmount,
         uint8 state,
+        uint8 disputeStatus,
         address disputedParty,
         uint256 completeTime,
         uint256 createTime
@@ -538,6 +551,7 @@ contract Exchange is Ownable, ReentrancyGuard {
         trade.exthReward,
         trade.feeAmount,
         trade.state,
+        trade.disputeStatus,
         trade.disputedParty,
         trade.completeTime,
         trade.createTime

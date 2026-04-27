@@ -5,6 +5,7 @@ package com.mnnu.component.handler;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.TextMessage;
@@ -16,10 +17,9 @@ import java.util.concurrent.ConcurrentHashMap;
 
 @Slf4j
 @Component
-@RequiredArgsConstructor
 public class CustomWebSocketHandler extends TextWebSocketHandler {
-
-    private final WebSocketService webSocketService;
+    @Autowired
+    private WebSocketService webSocketService;
 
     // 存储所有在线会话
     private static final Map<String, WebSocketSession> sessions = new ConcurrentHashMap<>();

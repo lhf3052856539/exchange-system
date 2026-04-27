@@ -10,6 +10,9 @@ import org.springframework.amqp.support.converter.MessageConverter;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
+import static com.mnnu.constant.SystemConstants.MQQueue.BLOCKCHAIN_EVENT;
+import static com.mnnu.constant.SystemConstants.MQQueue.TRADE_MATCH;
+
 /**
  * RabbitMQ 配置类
  * 负责声明队列、交换机和绑定关系
@@ -22,18 +25,18 @@ public class RabbitConfig {
      */
     @Bean
     public Queue tradeMatchQueue() {
-        return new Queue(SystemConstants.MQQueue.TRADE_MATCH, true);
+        // durable=true 表示队列持久化
+        return QueueBuilder.durable(TRADE_MATCH).build();
     }
-
 
     /**
      * 区块链事件队列
      */
     @Bean
     public Queue blockchainEventQueue() {
-        return new Queue(SystemConstants.MQQueue.BLOCKCHAIN_EVENT, true);
+        // durable=true 表示队列持久化
+        return QueueBuilder.durable(BLOCKCHAIN_EVENT).build();
     }
-
 
 
     /**
@@ -41,25 +44,25 @@ public class RabbitConfig {
      */
     @Bean
     public DirectExchange defaultExchange() {
-        return new DirectExchange("exchange.default");
+        // durable=true 表示交换机持久化
+        return ExchangeBuilder.directExchange("exchange.default").durable(true).build();
     }
-
     /**
      * 绑定队列到交换机
      */
     @Bean
     public Binding tradeMatchBinding(Queue tradeMatchQueue, DirectExchange defaultExchange) {
-        return BindingBuilder.bind(tradeMatchQueue).to(defaultExchange).with(SystemConstants.MQQueue.TRADE_MATCH);
+        return BindingBuilder.bind(tradeMatchQueue).to(defaultExchange).with(TRADE_MATCH);
     }
 
 
 
     @Bean
     public Binding blockchainEventBinding(Queue blockchainEventQueue, DirectExchange defaultExchange) {
-        return BindingBuilder.bind(blockchainEventQueue).to(defaultExchange).with(SystemConstants.MQQueue.BLOCKCHAIN_EVENT);
+        return BindingBuilder.bind(blockchainEventQueue).to(defaultExchange).with(BLOCKCHAIN_EVENT);
     }
 
-        /**
+    /**
      * JSON 消息转换器
      */
     @Bean
@@ -75,6 +78,22 @@ public class RabbitConfig {
         RabbitTemplate rabbitTemplate = new RabbitTemplate(connectionFactory);
         rabbitTemplate.setMessageConverter(messageConverter);
         rabbitTemplate.setExchange("exchange.default");
+
+        // 开启发布确认（Publisher Confirm）
+        rabbitTemplate.setConfirmCallback((correlationData, ack, cause) -> {
+            if (!ack) {
+                // 消息发送失败，记录日志或重试
+                System.err.println("Message send failed: " + cause);
+            }
+        });
+
+        // 开启返回回调（处理路由失败的情况）
+        rabbitTemplate.setReturnsCallback(returned -> {
+            System.err.println("Message returned: " + returned.getMessage() +
+                    ", replyCode: " + returned.getReplyCode() +
+                    ", replyText: " + returned.getReplyText());
+        });
+
         return rabbitTemplate;
     }
 

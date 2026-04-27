@@ -7,6 +7,7 @@ import com.mnnu.service.NotificationService;
 import com.mnnu.vo.JsonVO;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
@@ -14,10 +15,9 @@ import java.util.List;
 @Slf4j
 @RestController
 @RequestMapping("/apis/notification")
-@RequiredArgsConstructor
 public class NotificationController implements NotificationApi {
-
-    private final NotificationService notificationService;
+    @Autowired
+    private NotificationService notificationService;
 
     @Override
     public JsonVO<List<NotificationDTO>> getNotifications(

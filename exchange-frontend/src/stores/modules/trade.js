@@ -129,29 +129,85 @@ export const useTradeStore = defineStore('trade', {
                 throw new Error('Wallet not connected')
             }
 
-            // 调用最终确认接口 - 使用完整 URL
-            const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8096/apis'
-            const response = await fetch(`${apiBaseUrl}/trade/final-confirm-party-a?tradeId=${transactionId}`, {
-                method: 'POST',
-                headers: {
-                    'Authorization': `Bearer ${localStorage.getItem('token')}`,
-                    'Content-Type': 'application/json'
-                }
-            })
+            // 获取交易详情以获取 chainTradeId
+            const trade = await this.loadTradeDetail(transactionId)
+            const chainTradeId = trade.chainTradeId
 
-            if (!response.ok) {
-                const errorData = await response.json()
-                throw new Error(errorData.message || '操作失败')
+            if (!chainTradeId) {
+                throw new Error('Chain trade ID not found')
             }
 
-            const res = await response.json()
+            // 直接调用链上合约 completeTrade
+            const { ethers } = await import('ethers')
+            const provider = new ethers.BrowserProvider(window.ethereum)
+            const signer = await provider.getSigner()
+
+            const exchangeABI = [
+                "function completeTrade(uint256 tradeId) external returns (bool)"
+            ]
+
+            const exchangeAddress = import.meta.env.VITE_EXCHANGE_CONTRACT_ADDRESS
+            const exchangeContract = new ethers.Contract(exchangeAddress, exchangeABI, signer)
+
+            console.log('Calling chain completeTrade with chainTradeId:', chainTradeId)
+
+            const tx = await exchangeContract.completeTrade(chainTradeId)
+            console.log('Transaction sent:', tx.hash)
+
+            await tx.wait()
+            console.log('Chain completeTrade confirmed:', tx.hash)
+
+            // 等待后端监听器同步状态
+            await new Promise(resolve => setTimeout(resolve, 2000))
             await this.loadTradeDetail(transactionId)
-            return res.data
+
+            return trade
         },
 
         async submitDispute(param) {
-            const res = await disputeTrade(param)
-            return res.data
+            const walletStore = useWalletStore()
+            const address = walletStore.address
+
+            if (!address) {
+                throw new Error('Wallet not connected')
+            }
+
+            // 获取交易详情以获取 chainTradeId
+            const trade = await this.loadTradeDetail(param.tradeId)
+            const chainTradeId = trade.chainTradeId
+
+            if (!chainTradeId) {
+                throw new Error('Chain trade ID not found')
+            }
+
+            // 确定被争议方
+            const accusedParty = address === trade.partyA ? trade.partyB : trade.partyA
+
+            // 直接调用链上合约 disputeTrade
+            const { ethers } = await import('ethers')
+            const provider = new ethers.BrowserProvider(window.ethereum)
+            const signer = await provider.getSigner()
+
+            const exchangeABI = [
+                "function disputeTrade(uint256 tradeId, address disputedParty) external"
+            ]
+
+            const exchangeAddress = import.meta.env.VITE_EXCHANGE_CONTRACT_ADDRESS
+            const exchangeContract = new ethers.Contract(exchangeAddress, exchangeABI, signer)
+
+            console.log('Calling chain disputeTrade with chainTradeId:', chainTradeId, 'accusedParty:', accusedParty)
+
+            const tx = await exchangeContract.disputeTrade(chainTradeId, accusedParty)
+            console.log('Transaction sent:', tx.hash)
+
+            await tx.wait()
+            console.log('Chain disputeTrade confirmed:', tx.hash)
+
+            // 等待后端监听器同步状态
+            await new Promise(resolve => setTimeout(resolve, 2000))
+            await this.loadTradeDetail(param.tradeId)
+
+            return trade
         },
 
         clearCurrentTrade() {

@@ -1,11 +1,13 @@
 package com.mnnu.controller;
 
+import com.mnnu.apis.TradeApi;
 import com.mnnu.config.CurrentUser;
 import com.mnnu.dto.*;
 import com.mnnu.service.MultiSigWalletService;
 import com.mnnu.service.TradeService;
 import com.mnnu.vo.JsonVO;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
 
 import java.math.BigInteger;
@@ -13,11 +15,9 @@ import java.util.List;
 
 @RestController
 @RequestMapping("/apis/trade")
-@RequiredArgsConstructor
-public class TradeController {
-
-    private final TradeService tradeService;
-    private final MultiSigWalletService multiSigWalletService;
+public class TradeController implements TradeApi {
+    @Autowired
+    private TradeService tradeService;
 
     /**
      * 请求交易匹配
@@ -40,20 +40,22 @@ public class TradeController {
     /**
      * 率先转账方 (Party A) 确认
      */
-    @PostMapping("/confirm/party-a")
+    @PostMapping("/confirm-party-a")
     public JsonVO<TradeDTO> confirmPartyA(
             @CurrentUser String address,
-            String tradeId, String txHash) {
+            @RequestParam String tradeId,
+            @RequestParam String txHash) {
         return JsonVO.success(tradeService.confirmPartyA(address, tradeId, txHash));
     }
 
     /**
      * 履约方 (Party B) 确认
      */
-    @PostMapping("/confirm/party-b")
+    @PostMapping("/confirm-party-b")
     public JsonVO<TradeDTO> confirmPartyB(
             @CurrentUser String address,
-            String tradeId, String txHash) {
+            @RequestParam String tradeId,
+            @RequestParam String txHash) {
         return JsonVO.success(tradeService.confirmPartyB(address, tradeId, txHash));
     }
 

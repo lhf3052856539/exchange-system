@@ -3,6 +3,7 @@ import com.mnnu.dto.UserDTO;
 import com.mnnu.dto.UserTradeStatsDTO;
 import org.springframework.scheduling.annotation.Async;
 
+import java.math.BigDecimal;
 import java.util.List;
 
 /**
@@ -15,10 +16,8 @@ public interface UserService {
      */
     String login(String address, String signature);
 
-    /**
-     * 用户注册
-     */
-    UserDTO register(String address);
+
+    BigDecimal getExthBalance(String address);
 
     boolean isRegistered(String address);
 
@@ -27,13 +26,6 @@ public interface UserService {
      */
     UserDTO getUserInfo(String address);
 
-    /**
-     * 更新用户类型
-     */
-    UserDTO updateUserType(String address);
-
-    @Async("userTaskExecutor")
-    void asyncUpdateUserType(String address);
 
     /**
      * 计算可交易UT
@@ -46,18 +38,8 @@ public interface UserService {
     boolean isBlacklisted(String address);
 
 
-
     UserTradeStatsDTO getUserTradeStats(String address);
 
-    /**
-     * 增加用户交易次数
-     */
-    void incrementTradeCount(String address);
-
-    /**
-     * 从链上同步用户 EXTH 余额到数据库
-     */
-    void updateExthBalanceOnChain(String address);
 
 }
 

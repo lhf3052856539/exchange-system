@@ -8,6 +8,55 @@
         </div>
       </template>
 
+      <!-- 待上链的撮合交易 -->
+      <div v-if="matchedTrades.length > 0" class="matched-section mb-4">
+        <h3 style="margin-bottom: 16px; color: #409eff;">待创建链上交易对</h3>
+        <el-table
+            :data="matchedTrades"
+            v-loading="loading"
+            style="width: 100%"
+            border
+        >
+          <el-table-column label="交易对" width="150">
+            <template #default="{ row }">
+              {{ row.fromCurrency }}/{{ row.toCurrency }}
+            </template>
+          </el-table-column>
+          <el-table-column prop="amount" label="金额 (UT)" width="120" />
+          <el-table-column label="Party A" width="180">
+            <template #default="{ row }">
+              <span style="font-family: monospace; font-size: 12px;">{{ formatAddress(row.partyA) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="Party B" width="180">
+            <template #default="{ row }">
+              <span style="font-family: monospace; font-size: 12px;">{{ formatAddress(row.partyB) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="状态" width="120">
+            <template #default="{ row }">
+              <el-tag type="warning">已撮合</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" fixed="right" width="200">
+            <template #default="{ row }">
+              <el-button
+                  v-if="row.partyB === walletStore.address"
+                  type="primary"
+                  size="small"
+                  :loading="creatingOnChain === row.tradeId"
+                  @click="handleCreateOnChain(row)"
+              >
+                创建链上交易对
+              </el-button>
+              <span v-else style="color: #999; font-size: 12px;">等待 PartyB 操作</span>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
+
+      <el-divider v-if="matchedTrades.length > 0 && tradeList.length > 0" />
+
       <el-table
           :data="tradeList"
           v-loading="loading"
@@ -18,7 +67,7 @@
             {{ row.fromCurrency }}/{{ row.toCurrency }}
           </template>
         </el-table-column>
-        <el-table-column prop="amount" label="金额 (USD)" width="100" />
+        <el-table-column prop="amount" label="金额 (UT)" width="100" />
         <el-table-column label="状态" width="120">
           <template #default="{ row }">
             <el-tag :type="getStatusTag(row.status)">
@@ -29,7 +78,8 @@
         <el-table-column label="我的角色" width="100">
           <template #default="{ row }">
             <el-tag v-if="row.myRole === 'partyA'" type="success">甲方</el-tag>
-            <el-tag v-else type="warning">乙方</el-tag>
+            <el-tag v-else-if="row.myRole === 'partyB'" type="warning">乙方</el-tag>
+            <el-tag v-else type="info">未知</el-tag>
           </template>
         </el-table-column>
         <el-table-column label="操作" fixed="right" width="300">
@@ -46,7 +96,7 @@
 
             <!-- 确认按钮 -->
             <el-button
-                v-if="row.status === TRADE_STATUS_CODE.CONFIRMING_A && row.myRole === 'PARTY_A'"
+                v-if="row.status === TRADE_STATUS_CODE.CONFIRMING_A && row.myRole === 'partyA'"
                 type="primary"
                 size="small"
                 @click="handleConfirm(row, true)"
@@ -54,7 +104,7 @@
               确认转账
             </el-button>
             <el-button
-                v-if="row.status === TRADE_STATUS_CODE.CONFIRMING_B && row.myRole === 'PARTY_B'"
+                v-if="row.status === TRADE_STATUS_CODE.CONFIRMING_B && row.myRole === 'partyB'"
                 type="primary"
                 size="small"
                 @click="handleConfirm(row, false)"
@@ -136,29 +186,114 @@ import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useTradeStore } from '@/stores'
 import { useWalletStore } from '@/stores'
+import { useUserStore } from '@/stores/modules/user'
 import { useTrade } from '@/composables/useTrade'
 import { TRADE_STATUS_CODE } from '@/config/constants'
+import { createTradePair, getUserTrades, disputeTrade } from '@/api/trade'
+import * as ethers from 'ethers'
 
 const router = useRouter()
 const tradeStore = useTradeStore()
 const walletStore = useWalletStore()
+const userStore = useUserStore()
 const { loadTrades, confirmTrade, submitDispute, getStatusTag, getStatusText } = useTrade()
 
 const loading = computed(() => tradeStore.loading)
-const tradeList = computed(() => tradeStore.tradeList)
+// 过滤掉状态为 9（待创建链上交易对）的记录
+const tradeList = computed(() => tradeStore.tradeList.filter(item => item.status !== 9))
 const pagination = computed(() => tradeStore.pagination)
 
 const disputeDialogVisible = ref(false)
 const currentTrade = ref(null)
 const submitting = ref(false)
+const creatingOnChain = ref(null)
+
+const matchedTrades = ref([])
 
 const disputeForm = ref({
   reason: '',
   description: ''
 })
 
+
 async function handleRefresh() {
   await loadTrades()
+  await fetchMatchedTrades()
+}
+
+async function fetchMatchedTrades() {
+  try {
+    const walletStore = useWalletStore()
+    if (!walletStore.address) return
+
+    const res = await getUserTrades(walletStore.address, 9)
+    matchedTrades.value = res.data || []
+  } catch (error) {
+    console.error('Failed to fetch matched trades:', error)
+  }
+}
+
+async function handleCreateOnChain(trade) {
+  const userAddress = walletStore.address
+
+  if (trade.partyB.toLowerCase() !== userAddress.toLowerCase()) {
+    ElMessage.warning('只有 PartyB 可以发起链上创建交易对')
+    return
+  }
+
+  try {
+    creatingOnChain.value = trade.tradeId
+
+    if (!window.ethereum) {
+      throw new Error('请安装 MetaMask')
+    }
+
+    ElMessage.info('请在钱包中确认创建交易对...')
+
+    const provider = new ethers.BrowserProvider(window.ethereum)
+    const signer = await provider.getSigner()
+
+    const EXCHANGE_ADDRESS = import.meta.env.VITE_EXCHANGE_CONTRACT_ADDRESS
+    if (!EXCHANGE_ADDRESS) {
+      throw new Error('Exchange 合约地址未配置')
+    }
+
+    const EXCHANGE_ABI = [
+      'function createTradePair(address partyA, address partyB, uint256 amount, uint256 feeAmount, uint256 tradeId) external returns (uint256)'
+    ]
+
+    const contract = new ethers.Contract(EXCHANGE_ADDRESS, EXCHANGE_ABI, signer)
+
+    const numericPart = trade.tradeId.replace(/\D/g, '')
+    const tradeId = BigInt(numericPart || Date.now())
+
+    const amountWei = ethers.parseUnits(trade.amount.toString(), 6)
+    const feeAmount = ethers.parseUnits((Number(trade.amount) / 10000).toString(), 6)
+
+    const tx = await contract.createTradePair(
+        trade.partyA,
+        trade.partyB,
+        amountWei,
+        feeAmount,
+        tradeId
+    )
+
+    console.log('🔄 交易已发送:', tx.hash)
+    ElMessage.info('等待交易确认...')
+
+    const receipt = await tx.wait()
+    console.log('✅ 交易已确认:', receipt.transactionHash)
+
+    ElMessage.success(`链上交易对创建成功: ${receipt.transactionHash}`)
+
+    await fetchMatchedTrades()
+    await loadTrades()
+  } catch (error) {
+    console.error('Create trade pair failed:', error)
+    ElMessage.error(error.message || '创建交易对失败')
+  } finally {
+    creatingOnChain.value = null
+  }
 }
 
 async function handleConfirm(row, isPartyA) {
@@ -173,12 +308,97 @@ async function handleConfirm(row, isPartyA) {
         }
     )
 
-    await confirmTrade(row.tradeId, txHash, isPartyA)
+    // 新流程：先调用后端校验，再调用链上合约
+    await confirmOnChain(row.tradeId, txHash, isPartyA)
     await loadTrades()
+    ElMessage.success('确认成功，等待链上事件同步...')
   } catch (error) {
     if (error !== 'cancel') {
       console.error('Confirm failed:', error)
+      ElMessage.error('操作失败：' + (error.message || '未知错误'))
     }
+  }
+}
+
+/**
+ * 在链上确认交易（甲方或乙方）
+ * 流程：后端校验 → 前端调用链上合约 → 后端监听器同步
+ */
+async function confirmOnChain(tradeId, txHash, isPartyA) {
+  try {
+    if (!window.ethereum) {
+      throw new Error('请安装 MetaMask')
+    }
+
+    const provider = new ethers.BrowserProvider(window.ethereum)
+    const signer = await provider.getSigner()
+    const address = await signer.getAddress()
+
+    // 1. 先调用后端进行数据校验
+    ElMessage.info('正在进行数据校验...')
+    const validateUrl = isPartyA
+        ? '/trade/confirm-party-a'
+        : '/trade/confirm-party-b'
+
+    const response = await fetch(`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:8096/apis'}${validateUrl}`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${localStorage.getItem('token')}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        address,
+        tradeId,
+        txHash
+      })
+    })
+
+    if (!response.ok) {
+      const errorData = await response.json()
+      throw new Error(errorData.message || '后端校验失败')
+    }
+
+    ElMessage.success('✅ 后端校验通过，开始链上确认...')
+
+    // 2. 调用链上合约进行确认
+    const EXCHANGE_ADDRESS = import.meta.env.VITE_EXCHANGE_CONTRACT_ADDRESS
+    if (!EXCHANGE_ADDRESS) {
+      throw new Error('Exchange 合约地址未配置')
+    }
+
+    const EXCHANGE_ABI = [
+      'function confirmPartyA(uint256 chainTradeId, bytes32 txHash) external',
+      'function confirmPartyB(uint256 chainTradeId, bytes32 txHash) external',
+      'function getTradeInfo(uint256 chainTradeId) view returns (tuple(uint256 id, uint256 chainTradeId, address partyA, address partyB, uint256 amount, uint256 exchangeRate, uint256 state, address disputedParty, uint256 completeTime))'
+    ]
+
+    const contract = new ethers.Contract(EXCHANGE_ADDRESS, EXCHANGE_ABI, signer)
+
+    // 查询链上交易 ID
+    const tradeInfo = await contract.getTradeInfo(BigInt(tradeId))
+    const chainTradeId = tradeInfo.chainTradeId
+
+    // 将 txHash 字符串转换为 bytes32
+    const txHashBytes32 = ethers.hexlify(ethers.toUtf8Bytes(txHash.padEnd(64, '0').slice(0, 64)))
+
+    // 调用对应的确认函数
+    let tx
+    if (isPartyA) {
+      tx = await contract.confirmPartyA(chainTradeId, txHashBytes32)
+    } else {
+      tx = await contract.confirmPartyB(chainTradeId, txHashBytes32)
+    }
+
+    ElMessage.info('交易已提交，等待区块确认...')
+
+    const receipt = await tx.wait()
+    ElMessage.success(`✅ 链上确认成功！交易哈希：${receipt.transactionHash}`)
+
+    // 3. 后端监听器会自动同步链上事件，刷新页面即可看到最新状态
+    console.log('⏳ 等待后端监听器同步链上事件...')
+  } catch (error) {
+    console.error('Chain confirmation failed:', error)
+    throw error
   }
 }
 
@@ -191,37 +411,66 @@ function handleDispute(row) {
   disputeDialogVisible.value = true
 }
 
-async function submitDisputeHandler(event) {
-  console.log('=== submitDisputeHandler called ===')
-  console.log('Event:', event)
-  console.log('currentTrade:', currentTrade.value)
-  console.log('tradeId:', currentTrade.value?.tradeId)
-
+async function submitDisputeHandler() {
   if (!disputeForm.value.reason) {
     ElMessage.warning('请选择争议原因')
     return
   }
 
+  // 修复：使用 currentTrade.value 而不是 trade.value
   if (!currentTrade.value?.tradeId) {
     ElMessage.error('交易 ID 为空')
     return
   }
 
-  const payload = {
-    tradeId: currentTrade.value.tradeId,
-    reason: disputeForm.value.reason,
-    evidence: disputeForm.value.description
-  }
-
-  console.log('Payload to send:', payload)
-  console.log('Stringified:', JSON.stringify(payload))
-
   submitting.value = true
   try {
-    await submitDispute(payload)
+    const chainTradeId = currentTrade.value.chainTradeId || currentTrade.value.tradeId
+
+    if (!chainTradeId) {
+      ElMessage.error('链上交易 ID 不存在，请先创建链上交易对')
+      return
+    }
+
+    ElMessage.info('正在验证争议信息...')
+    const validateRes = await disputeTrade({
+      chainTradeId: chainTradeId.toString(),
+      reason: disputeForm.value.reason,
+      evidence: disputeForm.value.description
+    })
+
+    if (!validateRes.data || !validateRes.data.chainTradeId) {
+      ElMessage.error('后端校验失败')
+      return
+    }
+
+    const disputedParty = validateRes.data.accused
+
+    // 2. 校验通过后，前端调用链上合约
+    ElMessage.info('正在提交链上争议...')
+
+    const EXCHANGE_ADDRESS = import.meta.env.VITE_EXCHANGE_CONTRACT_ADDRESS
+    if (!EXCHANGE_ADDRESS) {
+      throw new Error('Exchange 合约地址未配置')
+    }
+
+    const EXCHANGE_ABI = [
+      'function disputeTrade(uint256 tradeId, address disputedParty) external'
+    ]
+
+    const provider = new ethers.BrowserProvider(window.ethereum)
+    const signer = await provider.getSigner()
+    const contract = new ethers.Contract(EXCHANGE_ADDRESS, EXCHANGE_ABI, signer)
+
+    const tx = await contract.disputeTrade(chainTradeId, disputedParty)
+    ElMessage.info('交易已提交，等待区块确认...')
+
+    const receipt = await tx.wait()
+    ElMessage.success('争议提交成功！交易哈希：' + receipt.transactionHash)
+
     disputeDialogVisible.value = false
     await loadTrades()
-    ElMessage.success('争议提交成功')
+
   } catch (error) {
     console.error('Dispute failed:', error)
     ElMessage.error('提交失败：' + (error.message || '未知错误'))
@@ -229,6 +478,8 @@ async function submitDisputeHandler(event) {
     submitting.value = false
   }
 }
+
+
 function viewDetail(tradeId) {
   router.push(`/trade/${tradeId}`)
 }
@@ -242,12 +493,20 @@ function handleSizeChange(size) {
   loadTrades({ page: 1, size })
 }
 
+function formatAddress(address) {
+  if (!address) return 'N/A'
+  return address.slice(0, 6) + '...' + address.slice(-4)
+}
+
 onMounted(async () => {
   if (walletStore.address) {
     await loadTrades()
+    await fetchMatchedTrades()
   }
 })
 </script>
+
+
 
 <style lang="scss" scoped>
 .trade-list {
@@ -272,11 +531,30 @@ onMounted(async () => {
     display: flex;
     justify-content: flex-end;
   }
+
+  .matched-section {
+    animation: fadeIn 0.5s ease-in;
+  }
+
+  @keyframes fadeIn {
+    from {
+      opacity: 0;
+      transform: translateY(-10px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
 }
 
 .card-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
+}
+
+.mb-4 {
+  margin-bottom: 16px;
 }
 </style>

@@ -6,12 +6,17 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
 
+interface IExchange {
+    function updateUserType(address user) external;
+}
+
 contract Airdrop is Ownable {
     // --- 不可变量 (Immutable) ---
     // 在构造时一次性设定，永不可改，保证了合约的核心安全性，且节省Gas。
 
     bytes32 public immutable merkleRoot; // 白名单的“数字指纹”
     IERC20 public immutable token;       // 空投的代币
+    IExchange public immutable exchangeContract;
 
     // --- 状态变量 ---
 
@@ -22,24 +27,24 @@ contract Airdrop is Ownable {
 
     event AirdropClaimed(address indexed claimant, uint256 amount);
     event TokensReclaimed(address indexed recipient, uint256 amount);
+    event UpdateUserTypeFailed(address indexed user);
 
     // --- 构造函数 ---
 
-    /**
-     * @param _merkleRoot 链下计算好的白名单默克尔根
-     * @param _tokenAddress 空投代币的合约地址
-     * @param _daoTimelock DAO的Timelock合约地址，将所有权直接赋予DAO
-     */
+
     constructor(
         bytes32 _merkleRoot,
         address _tokenAddress,
+        address _exchangeAddress,
         address _daoTimelock
     ) Ownable(_daoTimelock) {
         require(_merkleRoot != bytes32(0), "Merkle root cannot be zero");
         require(_tokenAddress != address(0), "Token address cannot be zero");
+        require(_exchangeAddress != address(0), "Exchange address cannot be zero");
 
         merkleRoot = _merkleRoot;
         token = IERC20(_tokenAddress);
+        exchangeContract = IExchange(_exchangeAddress);
     }
 
     // --- 用户功能 ---
@@ -66,6 +71,14 @@ contract Airdrop is Ownable {
         // 执行：向用户转账 (Interactions)
         // 使用 safeTransfer 可以避免某些特殊ERC20代币的问题，但为简化，这里用transfer
         require(token.transfer(msg.sender, amount), "Token transfer failed");
+
+        // 领取成功后，同步更新 Exchange 合约中的用户类型
+            try exchangeContract.updateUserType(msg.sender) {
+                // 更新成功
+            } catch {
+                // 即使更新失败也不回滚转账，确保用户能拿到钱
+                emit UpdateUserTypeFailed(msg.sender);
+            }
 
         emit AirdropClaimed(msg.sender, amount);
     }

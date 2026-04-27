@@ -37,7 +37,7 @@ async function main() {
     // 从 StrategicSwap 合约获取需要转移的 EXTH 数量
     // 这里需要你手动指定，或者读取链上数据
     // 请根据实际情况修改 EXTH 数量
-    const exthAmount = ethers.parseUnits("50000000000", 6); //  万枚 EXTH (6 位小数)
+    const exthAmount = ethers.parseUnits("5000000000", 6); //  万枚 EXTH (6 位小数)
 
     const calldata1 = treasureInterface.encodeFunctionData("withdrawERC20", [
         addresses.tokens.EXTH,           // ERC20 代币地址

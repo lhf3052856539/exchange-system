@@ -2,6 +2,7 @@ package com.mnnu.config;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.web.method.support.HandlerMethodArgumentResolver;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
@@ -14,8 +15,8 @@ import java.util.List;
 @Slf4j
 @Configuration
 public class WebConfig implements WebMvcConfigurer {
-
-    private final CurrentUserArgumentResolver currentUserArgumentResolver;
+    @Autowired
+    private CurrentUserArgumentResolver currentUserArgumentResolver;
 
     public WebConfig(CurrentUserArgumentResolver currentUserArgumentResolver) {
         log.info("=== Creating WebConfig with resolver: {}", currentUserArgumentResolver);

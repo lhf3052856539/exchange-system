@@ -9,92 +9,67 @@ import com.mnnu.service.AirdropService;
 import com.mnnu.vo.JsonVO;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
 import java.math.BigInteger;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 @Slf4j
 @RestController
 @RequestMapping("/apis/airdrop")
-@RequiredArgsConstructor
 public class AirdropController implements AirdropApi {
+    @Autowired
+    private AirdropService airdropService;
 
-    private final AirdropService airdropService;
+    /**
+     * 查询当前用户的空投领取资格及 Merkle Proof
+     * 前端获取数据后，自行调用链上合约进行领取
+     */
+    @GetMapping("/claim-info")
+    public JsonVO<Map<String, Object>> getClaimInfo(@CurrentUser String address) {
+        log.info("🔍 Querying airdrop claim info for: {}", address);
+            Map<String, Object> info = airdropService.getUserClaimInfo(address);
 
-    @PostMapping("/claim")
-    public JsonVO<Void> claimAirdrop(@CurrentUser String address,
-                                           @RequestBody AirdropClaimRequest request) {
-        // 验证参数
-        if (request.getAmount() == null) {
-            throw new IllegalArgumentException("Amount is required");
-        }
+            if (info.isEmpty()) {
+                return JsonVO.success(Map.of("isActive", false));
+            }
 
-        // Merkle proof 可以为空（当只有一个叶子时）
-        List<String> merkleProof = request.getMerkleProof();
-        if (merkleProof == null) {
-            throw new IllegalArgumentException("Merkle proof is required");
-        }
+            return JsonVO.success(info);
 
-        // 添加调试日志
-        log.info("🔍 Received airdrop claim request:");
-        log.info("   Address: {}", address);
-        log.info("   Amount: {}", request.getAmount());
-        log.info("   Merkle Proof (hex strings): {}", merkleProof);
-        log.info("   Proof length: {}", merkleProof.size());
-
-        // 将十六进制字符串数组转换为 byte[] 数组（过滤掉 null 和空值）
-        List<byte[]> proofBytes = merkleProof.stream()
-                .filter(hex -> hex != null && !hex.isEmpty())
-                .map(this::hexStringToByteArray)
-                .toList();
-
-        // 添加调试日志
-        log.info("   Converted proof bytes count: {}", proofBytes.size());
-        for (int i = 0; i < proofBytes.size(); i++) {
-            log.info("   Proof[{}] length: {} bytes", i, proofBytes.get(i).length);
-        }
-        airdropService.claimAirdrop(address, request.getAmount(), proofBytes);
-
-        return JsonVO.success();
-    }
-
-    @GetMapping("/has-claimed")
-    public JsonVO<Boolean> hasClaimed(@CurrentUser String address) {
-        return JsonVO.success(airdropService.hasClaimed(address));
-    }
-
-    @GetMapping("/info")
-    public JsonVO<AirdropInfoDTO> getAirdropInfo(@CurrentUser String address) {
-        return JsonVO.success(airdropService.getAirdropInfo(address));
     }
 
     /**
-     * 十六进制字符串转字节数组
+     * 领取空投（先查数据库验证，前端再调用链上合约）
      */
-    private byte[] hexStringToByteArray(String hex) {
-        if (hex == null) {
-            throw new IllegalArgumentException("Hex string cannot be null");
-        }
+    @PostMapping("/claim")
+    public JsonVO<Map<String, Object>> claimAirdrop(@CurrentUser String address) {
+        log.info("Validating airdrop claim for: {}", address);
 
-        hex = hex.trim();
-        if (hex.isEmpty()) {
-            throw new IllegalArgumentException("Hex string cannot be empty");
-        }
+        try {
+            Map<String, Object> claimInfo = airdropService.getUserClaimInfo(address);
 
-        if (hex.startsWith("0x")) {
-            hex = hex.substring(2);
-        }
+            if (claimInfo.isEmpty() || !(Boolean) claimInfo.getOrDefault("canClaim", false)) {
+                return JsonVO.error("No airdrop eligibility or already claimed");
+            }
 
-        int len = hex.length();
-        if (len % 2 != 0) {
-            throw new IllegalArgumentException("Hex string must have even length: " + hex);
-        }
+            BigInteger amount = new BigInteger(claimInfo.get("amount").toString());
+            @SuppressWarnings("unchecked")
+            List<String> proof = (List<String>) claimInfo.get("merkleProof");
 
-        byte[] data = new byte[len / 2];
-        for (int i = 0; i < len; i += 2) {
-            data[i / 2] = (byte) ((Character.digit(hex.charAt(i), 16) << 4)
-                    + Character.digit(hex.charAt(i+1), 16));
+            airdropService.claimOnChain(address, amount, proof);
+
+            Map<String, Object> result = new HashMap<>();
+            result.put("validated", true);
+            result.put("amount", amount.toString());
+            result.put("merkleProof", proof);
+
+            return JsonVO.success(result);
+
+        } catch (Exception e) {
+            log.error("Failed to validate airdrop claim", e);
+            return JsonVO.error(e.getMessage());
         }
-        return data;
     }
 }

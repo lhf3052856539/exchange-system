@@ -1,10 +1,9 @@
 // src/utils/websocket.js
 import { ElMessage } from 'element-plus'
-import { Client } from '@stomp/stompjs'
 
 class WebSocketClient {
     constructor() {
-        this.client = null
+        this.ws = null
         this.reconnectTimer = null
         this.heartbeatTimer = null
         this.reconnectCount = 0
@@ -14,126 +13,97 @@ class WebSocketClient {
     }
 
     connect(address) {
-        if (this.client && this.client.connected) {
-            console.log('STOMP already connected')
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            console.log('WebSocket already connected')
             return
         }
 
         try {
             const token = localStorage.getItem('token')
-            const wsUrl = `http://localhost:8096/ws?token=${token}`
+            const wsUrl = `ws://localhost:8096/ws?token=${token}`
 
-            this.client = new Client({
-                brokerURL: wsUrl,
-                reconnectDelay: this.reconnectInterval,
-                heartbeatIncoming: this.heartbeatInterval,
-                heartbeatOutgoing: this.heartbeatInterval,
+            this.ws = new WebSocket(wsUrl)
 
-                connectHeaders: {
-                    'user-id': address
-                },
+            this.ws.onopen = () => {
+                console.log('✅ WebSocket connected')
+                this.reconnectCount = 0
+                this.startHeartbeat()
+            }
 
-                onConnect: (frame) => {
-                    console.log('✅ STOMP connected:', frame)
-                    this.reconnectCount = 0
-                    this.startHeartbeat()
-
-                    // 订阅个人通知主题
-                    const notificationSub = this.client.subscribe(`/topic/notifications/${address}`, (message) => {
-                        console.log('📩 [NOTIFICATION] Raw message:', message)
-                        console.log('📩 [NOTIFICATION] Body:', message.body)
-                        this.handleNotification(message)
-                    })
-                    console.log('✅ Subscribed to /topic/notifications/', address, 'subscription id:', notificationSub.id)
-
-                    console.log('🎉 All subscriptions completed')
-                },
-
-
-                onStompError: (frame) => {
-                    console.error('STOMP error:', frame)
-                },
-
-                onDisconnect: () => {
-                    console.log('STOMP disconnected')
-                    this.stopHeartbeat()
-                    this.attemptReconnect(address)
-                },
-
-                onWebSocketError: (event) => {
-                    console.error('WebSocket error:', event)
+            this.ws.onmessage = (event) => {
+                console.log('📩 Received message:', event.data)
+                try {
+                    const data = JSON.parse(event.data)
+                    this.handleMessage(data, address)
+                } catch (error) {
+                    console.error('Failed to parse message:', error)
                 }
-            })
+            }
 
-            this.client.activate()
+            this.ws.onerror = (event) => {
+                console.error('WebSocket error:', event)
+            }
+
+            this.ws.onclose = () => {
+                console.log('WebSocket disconnected')
+                this.stopHeartbeat()
+                this.attemptReconnect(address)
+            }
 
         } catch (error) {
-            console.error('Failed to create STOMP connection:', error)
+            console.error('Failed to create WebSocket connection:', error)
         }
     }
 
-    send(destination, body) {
-        if (this.client && this.client.connected) {
-            this.client.publish({
-                destination: destination,
-                body: JSON.stringify(body)
-            })
+    handleMessage(data, address) {
+        // 根据消息类型处理
+        if (data.type === 'notification') {
+            this.handleNotification(data)
+        } else if (data.type === 'trade') {
+            this.handleTradeUpdate(data)
+        }
+    }
+
+    handleNotification(data) {
+        console.log('🔔 Notification received:', data)
+
+        ElMessage({
+            message: data.content || data.message || '收到新通知',
+            type: data.level || 'info',
+            duration: 5000,
+            offset: 80
+        })
+
+        // 触发自定义事件
+        window.dispatchEvent(new CustomEvent('notification-received', {
+            detail: data
+        }))
+    }
+
+    handleTradeUpdate(data) {
+        console.log('Trade update received:', data)
+
+        window.dispatchEvent(new CustomEvent('trade-updated', { detail: data }))
+
+        ElMessage({
+            message: `交易 ${data.tradeId} 状态更新：${data.status}`,
+            type: 'success',
+            duration: 3000
+        })
+    }
+
+    send(message) {
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            this.ws.send(JSON.stringify(message))
         } else {
-            console.warn('STOMP is not connected, message not sent')
-        }
-    }
-
-    handleNotification(message) {
-        try {
-            console.log('🔍 Parsing notification body...')
-            const data = JSON.parse(message.body)
-            console.log('🔔 Notification parsed successfully:', data)
-            console.log('   - Title:', data.title)
-            console.log('   - Content:', data.content)
-            console.log('   - Type:', data.type)
-
-            ElMessage({
-                message: data.content || data.message || '收到新通知',
-                type: data.level || 'info',
-                duration: 5000,
-                offset: 80
-            })
-
-            // ✅ 触发自定义事件，让布局组件可以监听
-            window.dispatchEvent(new CustomEvent('notification-received', {
-                detail: data
-            }))
-        } catch (error) {
-            console.error('❌ Failed to parse notification:', error)
-            console.error('   - Raw body:', message.body)
-        }
-    }
-
-    handleTradeUpdate(message) {
-        try {
-            const data = JSON.parse(message.body)
-            console.log('Trade update received:', data)
-
-            // 触发自定义事件，页面可以监听这个事件来刷新数据
-            window.dispatchEvent(new CustomEvent('trade-updated', { detail: data }))
-
-            ElMessage({
-                message: `交易 ${data.tradeId} 状态更新：${data.status}`,
-                type: 'success',
-                duration: 3000
-            })
-        } catch (error) {
-            console.error('Failed to parse trade update:', error)
+            console.warn('WebSocket is not connected, message not sent')
         }
     }
 
     startHeartbeat() {
         this.heartbeatTimer = setInterval(() => {
-            if (this.client && this.client.connected) {
-                this.client.publish({
-                    destination: '/app/heartbeat',
-                    body: JSON.stringify({ type: 'ping' })
-                })
+            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                this.ws.send(JSON.stringify({ type: 'ping' }))
             }
         }, this.heartbeatInterval)
     }
@@ -168,9 +138,9 @@ class WebSocketClient {
 
         this.stopHeartbeat()
 
-        if (this.client) {
-            this.client.deactivate()
-            this.client = null
+        if (this.ws) {
+            this.ws.close()
+            this.ws = null
         }
     }
 }

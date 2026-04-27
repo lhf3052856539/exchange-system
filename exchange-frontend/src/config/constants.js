@@ -2,31 +2,31 @@
 
 // 交易状态枚举
 export const TRADE_STATUS = {
+  PENDING_CHAIN_CONFIRM: 'PENDING_CHAIN_CONFIRM', // 等待链上确认
   PENDING: 'PENDING',           // 待匹配
-  MATCHED: 'MATCHED',           // 已匹配
-  CONFIRMING_A: 'CONFIRMING_A', // 甲方确认中（等待甲方提交转账哈希）
-  PARTY_A_CONFIRMED: 'PARTY_A_CONFIRMED', // 甲方已确认（等待乙方确认）
-  CONFIRMING_B: 'CONFIRMING_B', // 乙方确认中（等待乙方提交转账哈希）
-  PARTY_B_CONFIRMED: 'PARTY_B_CONFIRMED', // 乙方已确认（等待甲方最终确认）
-  COMPLETED: 'COMPLETED',       // 已完成
-  FAILED: 'FAILED',             // 失败
-  CANCELLED: 'CANCELLED',       // 已取消
-  DISPUTED: 'DISPUTED'          // 争议中
+  MATCHED: 'MATCHED',           // 交易已创建，等待率先转账方确认转账
+  PARTY_A_CONFIRMED: 'PARTY_A_CONFIRMED', // 等待履约方确认转账
+  PARTY_B_CONFIRMED: 'PARTY_B_CONFIRMED', // 等待率先转账方最终确认
+  COMPLETED: 'COMPLETED',       // 交易已完成
+  FAILED: 'FAILED',             // 交易争议已解决
+  CANCELLED: 'CANCELLED',       // 交易已取消
+  DISPUTED: 'DISPUTED',          // 交易存在争议
+  EXPIRED: 'EXPIRED'            //交易已过期
 }
 
 // 交易状态数字映射（后端返回的数字状态码）
 export const TRADE_STATUS_CODE = {
-  WAITING_MATCH: 0,      // 等待匹配
-  MATCHED: 1,            // 已匹配
-  CONFIRMING_A: 2,       // 等待甲方确认
-  PARTY_A_CONFIRMED: 3,  // 甲方已确认
-  CONFIRMING_B: 4,       // 等待乙方确认
-  PARTY_B_CONFIRMED: 5,  // 乙方已确认
-  PENDING_CHAIN_CONFIRM: 6, // 待链上确认
-  COMPLETED: 7,          // 已完成
-  DISPUTED: 8,           // 争议中
-  EXPIRED: 9,            // 已过期
-  CANCELLED: 10          // 已取消
+  MATCHED: 0,            // 交易已创建，等待率先转账方确认转账
+  PARTY_A_CONFIRMED: 1,       // 等待履约方确认转账
+  PARTY_B_CONFIRMED: 2,       // 等待率先转账方最终确认
+  COMPLETED: 3,          // 交易已完成
+  CANCELLED: 4,          // 交易已取消
+  DISPUTED: 5,           // 交易存在争议
+  FAILED: 6,              //交易争议已解决
+  EXPIRED: 7,            // 交易已过期
+  PENDING_CHAIN_CONFIRM: 8, // 待链上确认
+  WAITING_MATCH: 9      // 等待匹配
+
 }
 
 // 用户类型枚举
@@ -48,12 +48,6 @@ export const TRADE_LIMITS = {
   MAX_UT: 70
 }
 
-// 空投配置
-export const AIRDROP_CONFIG = {
-  FIXED_AMOUNT: 100, // 每个地址可领取的空投数量
-  DECIMALS: 6        // 代币精度
-}
-
 
 // DAO 提案状态枚举
 export const PROPOSAL_STATE = {
@@ -64,20 +58,4 @@ export const PROPOSAL_STATE = {
   QUEUED: 'Queued',        // 已入队列
   EXECUTED: 'Executed',    // 已执行
   CANCELLED: 'Cancelled'   // 已取消
-}
-
-// DAO治理配置
-export const DAO_CONFIG = {
-  VOTING_PERIOD: 3 * 24 * 60 * 60,  // 投票周期：3 天（秒）
-  QUORUM_PERCENTAGE: 4,             // 法定人数比例：4%
-  PROPOSAL_THRESHOLD: 100,          // 提案门槛：100 EXTH
-  EXECUTION_DELAY: 7 * 24 * 60 * 60 // 执行延迟：7 天（秒）
-}
-
-// 时间常量
-export const TIME_CONSTANTS = {
-  SECOND: 1000,
-  MINUTE: 60 * 1000,
-  HOUR: 60 * 60 * 1000,
-  DAY: 24 * 60 * 60 * 1000
 }

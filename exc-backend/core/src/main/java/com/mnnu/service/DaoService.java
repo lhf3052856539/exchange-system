@@ -103,12 +103,12 @@ public interface DaoService {
     Map<String, Object> getTreasureBalance();
 
     /**
-     * 根据链上事件同步提案创建信息
+     * 同步提案创建信息
      */
-    void syncProposalFromChain(String proposalId, String proposer, String txHash);
+    boolean syncProposalFromChain(String proposalId, String proposer, String txHash);
 
     /**
      * 同步投票信息
      */
-    void syncProposalVotesFromChain(BigInteger proposalId);
+    boolean syncProposalVotesFromChain(BigInteger proposalId);
 }

@@ -33,8 +33,6 @@ service.interceptors.response.use(
     response => {
         const res = response.data
 
-        // 修改：不再检查 code，直接返回数据
-        // 因为后端返回格式是 {success: true, data: ...} 或 {success: false, message: ...}
         return res
     },
     error => {
@@ -45,10 +43,13 @@ service.interceptors.response.use(
         if (error.response) {
             switch (error.response.status) {
                 case 400:
-                    message = '请求参数错误'
+                    // 保留后端返回的原始消息
+                    message = error.response.data?.message || '请求参数错误'
                     break
                 case 401:
                     message = '未授权，请重新登录'
+                    localStorage.removeItem('token')
+                    window.location.href = '/login'
                     break
                 case 403:
                     message = '拒绝访问'

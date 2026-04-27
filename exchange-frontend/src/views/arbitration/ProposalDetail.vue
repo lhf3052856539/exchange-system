@@ -24,20 +24,20 @@
       <template v-else-if="proposal">
         <!-- 基本信息 -->
         <el-descriptions :column="2" border size="large">
-          <el-descriptions-item label="提案 ID">{{ proposal.proposalId }}</el-descriptions-item>
+          <el-descriptions-item label="提案 ID">{{ proposal.proposalId || proposal.id || '-' }}</el-descriptions-item>
           <el-descriptions-item label="交易 ID">
-            <router-link :to="`/trade/detail/${proposal.tradeId}`">
-              {{ proposal.tradeId }}
+            <router-link :to="`/trade/detail/${proposal.chainTradeId}`">
+              {{ proposal.chainTradeId || '-' }}
             </router-link>
           </el-descriptions-item>
           <el-descriptions-item label="被指控方">
             <div class="address-link">
-              {{ proposal.accusedParty }}
+              {{ proposal.accused || '-' }}
             </div>
           </el-descriptions-item>
           <el-descriptions-item label="受害方">
             <div class="address-link">
-              {{ proposal.victimParty }}
+              {{ proposal.initiator || '-' }}
             </div>
           </el-descriptions-item>
           <el-descriptions-item label="赔偿金额">
@@ -45,10 +45,10 @@
           </el-descriptions-item>
           <el-descriptions-item label="投票进度">
             <el-progress
-                :percentage="(proposal.voteCount / 2) * 100"
-                :status="proposal.voteCount >= 2 ? 'success' : 'normal'"
+                :percentage="((proposal.voteCount || 0) / 2) * 100"
+                :status="(proposal.voteCount || 0) >= 2 ? 'success' : 'normal'"
             />
-            <span class="vote-count">{{ proposal.voteCount }}/2 票</span>
+            <span class="vote-count">{{ proposal.voteCount || 0 }}/2 票</span>
           </el-descriptions-item>
           <el-descriptions-item label="状态">
             <el-tag v-if="proposal.executed" type="success">已执行</el-tag>
@@ -68,7 +68,7 @@
             <span class="section-title">仲裁原因</span>
           </template>
           <div class="reason-content">
-            {{ proposal.arbitrationReason || proposal.reason || '无' }}
+            {{ proposal.reason || '无' }}
           </div>
         </el-card>
 
@@ -93,7 +93,7 @@
         </div>
 
         <!-- 执行按钮（仅委员会成员，且票数足够时） -->
-        <div v-if="isCommitteeMember && proposal.voteCount >= 2 && !proposal.executed" class="mt-4">
+        <div v-if="isCommitteeMember && (proposal.voteCount || 0) >= 2 && !proposal.executed" class="mt-4">
           <el-button
               type="primary"
               size="large"

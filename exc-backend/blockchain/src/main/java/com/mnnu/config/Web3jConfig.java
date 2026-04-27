@@ -1,10 +1,10 @@
-package com.mnnu.config; // 确保这个包名和你的项目结构匹配
+package com.mnnu.config;
 
+import okhttp3.OkHttpClient; // 导入 OkHttpClient
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.web3j.crypto.Credentials;
-import org.web3j.crypto.WalletUtils;
 import org.web3j.protocol.Web3j;
 import org.web3j.protocol.http.HttpService;
 import org.web3j.tx.RawTransactionManager;
@@ -13,6 +13,7 @@ import org.web3j.tx.gas.ContractGasProvider;
 import org.web3j.tx.gas.StaticGasProvider;
 
 import java.math.BigInteger;
+import java.util.concurrent.TimeUnit; // 导入 TimeUnit
 
 /**
  * Web3j 配置
@@ -36,9 +37,27 @@ public class Web3jConfig {
     @Value("${web3j.network-id}")
     private long chainId;
 
+    // 添加 Web3j 连接和读取超时配置
+    @Value("${web3j.connect-timeout:30000}") // 默认 30 秒
+    private long connectTimeout;
+
+    @Value("${web3j.read-timeout:120000}") // 默认 120 秒
+    private long readTimeout;
+
     @Bean
     public Web3j web3j() {
-        return Web3j.build(new HttpService(nodeUrl));
+        // 1. 创建 OkHttpClient 并设置更长的超时时间
+        OkHttpClient okHttpClient = new OkHttpClient.Builder()
+                .connectTimeout(connectTimeout, TimeUnit.MILLISECONDS) // 连接超时
+                .readTimeout(readTimeout, TimeUnit.MILLISECONDS)     // 读取超时
+                .writeTimeout(connectTimeout, TimeUnit.MILLISECONDS) // 写入超时（通常和连接超时一致）
+                .build();
+
+        // 2. 使用这个自定义的 OkHttpClient 构建 HttpService
+        HttpService httpService = new HttpService(nodeUrl, okHttpClient, false); // 最后一个参数是是否包含公共参数，一般设为 false
+
+        // 3. 构建 Web3j 实例
+        return Web3j.build(httpService);
     }
 
     /**

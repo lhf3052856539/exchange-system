@@ -5,7 +5,7 @@ import lombok.Data;
 @Data
 public class ArbitrationProposalParam {
 
-    private String tradeId;
+    private String chainTradeId;
     private String accusedParty;
     private String victimParty;
     private String compensationAmount;

@@ -7,6 +7,7 @@ import com.mnnu.dto.ExchangeRateDTO;
 import com.mnnu.service.RateService;
 import com.mnnu.vo.JsonVO;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -18,10 +19,9 @@ import org.springframework.web.bind.annotation.RestController;
 
 @RestController
 @RequestMapping("/apis/rate")
-@RequiredArgsConstructor
 public class RateController implements RateApi {
-
-    private final RateService rateService;
+    @Autowired
+    private RateService rateService;
 
 
     @GetMapping("/all")

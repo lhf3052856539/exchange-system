@@ -6,32 +6,24 @@ import com.mnnu.dto.NotificationDTO;
 import com.mnnu.entity.NotificationEntity;
 import com.mnnu.mapper.NotificationMapper;
 import com.mnnu.service.NotificationService;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.BeanUtils;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.data.redis.core.RedisTemplate;
-import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
-
+import org.springframework.transaction.annotation.Transactional;
 import java.time.LocalDateTime;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
 
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class NotificationServiceImpl implements NotificationService {
 
-    private final RedisTemplate<String, String> redisTemplate;
 
-    @Autowired(required = false)
-    private SimpMessagingTemplate messagingTemplate;
-
-    private final ObjectMapper objectMapper = new ObjectMapper();
-
-    private final NotificationMapper notificationMapper;
+    @Autowired
+    private ObjectMapper objectMapper;
+    @Autowired
+    private NotificationMapper notificationMapper;
 
     /**
      * 发送通知（统一入口）
@@ -39,13 +31,14 @@ public class NotificationServiceImpl implements NotificationService {
      *      离线 → Redis 存储，等用户上线后推送
      */
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public void sendNotification(NotificationDTO notification) {
         log.info("Sending notification to {}: {}", notification.getAddress(), notification.getTitle());
 
         // 1. 存数据库（唯一数据源）
         saveToDatabase(notification);
 
-        // 2. 尝试 WebSocket 推送
+        // 2. 尝试 WebSocket 推送（失败不影响主流程）
         pushViaWebSocket(notification);
     }
 
@@ -53,14 +46,10 @@ public class NotificationServiceImpl implements NotificationService {
      * 保存到数据库
      */
     private void saveToDatabase(NotificationDTO notification) {
-        try {
-            NotificationEntity entity = new NotificationEntity();
-            BeanUtils.copyProperties(notification, entity);
-            notificationMapper.insert(entity);
-            log.debug("Notification saved to database for user {}", notification.getAddress());
-        } catch (Exception e) {
-            log.error("Failed to save notification to database: {}", e.getMessage());
-        }
+        NotificationEntity entity = new NotificationEntity();
+        BeanUtils.copyProperties(notification, entity);
+        notificationMapper.insert(entity);
+        log.debug("Notification saved to database for user {}", notification.getAddress());
     }
 
     /**
@@ -73,11 +62,12 @@ public class NotificationServiceImpl implements NotificationService {
             log.info("✅ Notification sent via WebSocket to {}", notification.getAddress());
         } catch (Exception e) {
             log.error("❌ Failed to send notification via WebSocket: {}", e.getMessage());
-            // 推送失败则降级存储到 Redis
+            // WebSocket 推送失败不影响数据库保存，不抛异常
         }
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public void sendUserUpgradeNotification(String address, int newType) {
         String title = "身份变更通知";
         String content = "";
@@ -90,12 +80,11 @@ public class NotificationServiceImpl implements NotificationService {
             content = "尊贵身份！您的 EXTH 余额已达标，正式升级为种子用户。";
         }
 
-        // 复用内部已有的发送逻辑（WebSocket + DB）
         NotificationDTO notification = new NotificationDTO();
         notification.setAddress(address);
         notification.setTitle(title);
         notification.setContent(content);
-        notification.setType(2); // 系统通知类型
+        notification.setType(2);
         notification.setIsRead(false);
         notification.setCreateTime(LocalDateTime.now());
 
@@ -104,6 +93,7 @@ public class NotificationServiceImpl implements NotificationService {
 
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public void sendTradeNotification(String address, String tradeId, String type) {
         NotificationDTO notification = new NotificationDTO();
         notification.setAddress(address);
@@ -129,6 +119,7 @@ public class NotificationServiceImpl implements NotificationService {
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public void sendDaoProposalNotification(String address, String proposalId, String title, String action) {
         NotificationDTO notification = new NotificationDTO();
         notification.setAddress(address);
@@ -137,6 +128,7 @@ public class NotificationServiceImpl implements NotificationService {
         String content = switch (action) {
             case "created" -> "新提案已创建：" + title;
             case "voted" -> "您已成功投票，提案：" + title;
+            case "received_vote" -> "您的提案 " + title + " 收到新投票";
             case "queued" -> "提案 " + title + " 已进入公示期";
             case "executed" -> "提案 " + title + " 已执行成功";
             case "cancelled" -> "提案 " + title + " 已取消";
@@ -152,6 +144,7 @@ public class NotificationServiceImpl implements NotificationService {
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public void sendArbitrationNotification(String address, String tradeId, String role, String action) {
         NotificationDTO notification = new NotificationDTO();
         notification.setAddress(address);
@@ -173,15 +166,17 @@ public class NotificationServiceImpl implements NotificationService {
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public void sendSystemNotification(String address, String title, String content) {
-        NotificationEntity notification = new NotificationEntity();
+        NotificationDTO notification = new NotificationDTO();
         notification.setAddress(address);
         notification.setTitle(title);
         notification.setContent(content);
-        notification.setType(2); // 2-系统通知
+        notification.setType(2);
         notification.setIsRead(false);
         notification.setCreateTime(LocalDateTime.now());
-        notificationMapper.insert(notification);
+
+        sendNotification(notification);
 
         log.info("System notification sent to {}: {}", address, title);
     }
@@ -189,51 +184,39 @@ public class NotificationServiceImpl implements NotificationService {
 
     @Override
     public List<NotificationDTO> getUserNotifications(String address, Boolean unreadOnly) {
-        try {
-            List<NotificationEntity> entities = notificationMapper.selectList(
-                    new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<NotificationEntity>()
-                            .eq(NotificationEntity::getAddress, address)
-                            .eq(unreadOnly != null && unreadOnly, NotificationEntity::getIsRead, false)
-                            .orderByDesc(NotificationEntity::getCreateTime)
-            );
+        List<NotificationEntity> entities = notificationMapper.selectList(
+                new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<NotificationEntity>()
+                        .eq(NotificationEntity::getAddress, address)
+                        .eq(unreadOnly != null && unreadOnly, NotificationEntity::getIsRead, false)
+                        .orderByDesc(NotificationEntity::getCreateTime)
+        );
 
-            return entities.stream()
-                    .map(this::convertToDTO)
-                    .collect(Collectors.toList());
-        } catch (Exception e) {
-            log.error("Failed to get user notifications: {}", e.getMessage());
-            return new ArrayList<>();
-        }
+        return entities.stream()
+                .map(this::convertToDTO)
+                .collect(Collectors.toList());
     }
+
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public void markAsRead(Long id, String address) {
-        try {
-            int rows = notificationMapper.markAsRead(id, address);
-            if (rows > 0) {
-                log.info("Notification {} marked as read for user {}", id, address);
-            }
-        } catch (Exception e) {
-            log.error("Failed to mark notification as read: {}", e.getMessage());
+        int rows = notificationMapper.markAsRead(id, address);
+        if (rows > 0) {
+            log.info("Notification {} marked as read for user {}", id, address);
         }
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public void markAllAsRead(String address) {
-        try {
-            int rows = notificationMapper.markAllAsRead(address);
-            log.info("{} notifications marked as read for user {}", rows, address);
-        } catch (Exception e) {
-            log.error("Failed to mark all as read: {}", e.getMessage());
-        }
+        int rows = notificationMapper.markAllAsRead(address);
+        log.info("{} notifications marked as read for user {}", rows, address);
     }
+
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public void deleteNotification(Long id, String address) {
-        try {
-            notificationMapper.deleteById(id);
-            log.info("Notification {} deleted for user {}", id, address);
-        } catch (Exception e) {
-            log.error("Failed to delete notification: {}", e.getMessage());
-        }
+        notificationMapper.deleteById(id);
+        log.info("Notification {} deleted for user {}", id, address);
     }
 
     /**

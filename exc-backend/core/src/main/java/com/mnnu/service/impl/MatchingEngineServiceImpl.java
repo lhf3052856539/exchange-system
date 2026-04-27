@@ -11,9 +11,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Lazy;
-import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Service;
-
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
@@ -22,24 +20,11 @@ import java.util.stream.Collectors;
 @Slf4j
 @Service
 public class MatchingEngineServiceImpl implements MatchingEngineService {
-
-    private final TradeService tradeService;
-    private final UserService userService;
-    private final RabbitTemplate rabbitTemplate;
+    @Autowired
+    private UserService userService;
 
     // 内存中的等待队列
     private final ConcurrentHashMap<String, QueueItem> waitingQueue = new ConcurrentHashMap<>();
-
-    @Autowired
-    public MatchingEngineServiceImpl(@Lazy TradeService tradeService,
-                                     UserService userService,
-                                     RabbitTemplate rabbitTemplate) {
-        this.tradeService = tradeService;
-        this.userService = userService;
-        this.rabbitTemplate = rabbitTemplate;
-    }
-
-
 
     /**
      * 添加到等待队列
@@ -71,6 +56,9 @@ public class MatchingEngineServiceImpl implements MatchingEngineService {
      */
     @Override
     public List<TradeMatchDTO> executeMatching() {
+        log.info("========== 开始执行匹配引擎 ==========");
+        log.info("当前等待队列大小: {}", waitingQueue.size());
+
         List<TradeMatchDTO> matches = new ArrayList<>();
         Set<String> processedPairs = new HashSet<>();
 
@@ -79,12 +67,22 @@ public class MatchingEngineServiceImpl implements MatchingEngineService {
                 .map(Map.Entry::getValue)
                 .collect(Collectors.groupingBy(item -> item.fromCurrency + "-" + item.toCurrency));
 
+        log.info("币种组合分组情况:");
+        for (Map.Entry<String, List<QueueItem>> entry : currencyGroups.entrySet()) {
+            log.info("  组合 {}: {} 个请求", entry.getKey(), entry.getValue().size());
+            for (QueueItem item : entry.getValue()) {
+                log.info("    - 地址: {}, 金额: {}, 时间: {}",
+                        item.address, item.amount, new java.util.Date(item.timestamp));
+            }
+        }
+
         // 遍历每个币种组合
         for (Map.Entry<String, List<QueueItem>> entry : currencyGroups.entrySet()) {
             String currencyPair = entry.getKey();
 
             // 如果已经处理过这个组合或其反向组合，跳过
             if (processedPairs.contains(currencyPair)) {
+                log.debug("跳过已处理的组合: {}", currencyPair);
                 continue;
             }
 
@@ -100,11 +98,15 @@ public class MatchingEngineServiceImpl implements MatchingEngineService {
             String reversePair = parts[1] + "-" + parts[0];
             List<QueueItem> groupB = currencyGroups.get(reversePair);
 
+            log.info("尝试匹配组合: {} vs {}", currencyPair, reversePair);
+
             if (groupB == null || groupB.isEmpty()) {
-                // 标记为已处理
+                log.warn("没有找到反向组合 {} 的匹配请求", reversePair);
                 processedPairs.add(currencyPair);
                 continue;
             }
+
+            log.info("找到 {} 个可匹配的反向请求", groupB.size());
 
             // 从两个组中两两配对
             int i = 0, j = 0;
@@ -112,16 +114,24 @@ public class MatchingEngineServiceImpl implements MatchingEngineService {
                 QueueItem itemA = groupA.get(i);
                 QueueItem itemB = groupB.get(j);
 
+                log.info("比较请求: A({} {}->{}) vs B({} {}->{})",
+                        itemA.address, itemA.amount, itemA.fromCurrency + "->" + itemA.toCurrency,
+                        itemB.address, itemB.amount, itemB.fromCurrency + "->" + itemB.toCurrency);
+
                 // 检查金额是否匹配
                 if (itemA.amount.equals(itemB.amount)) {
+                    log.info("✓ 金额匹配: {}", itemA.amount);
+
                     // 检查用户类型，不允许两个新用户匹配
                     int userTypeA = getUserType(itemA.address);
                     int userTypeB = getUserType(itemB.address);
 
+                    log.info("用户类型: A(type={}) vs B(type={})", userTypeA, userTypeB);
+
                     if (userTypeA == SystemConstants.UserType.NEW && userTypeB == SystemConstants.UserType.NEW) {
                         // 两个都是新用户，跳过这次匹配
-                        log.info("Skipped match: both users are NEW - {} vs {}, amount: {}",
-                                itemA.address, itemB.address, itemA.amount);
+                        log.info("✗ 跳过匹配: 两个用户都是新用户 - {} vs {}",
+                                itemA.address, itemB.address);
 
                         // 跳过金额较小的一方，让另一方继续等待合适的匹配
                         if (i < groupA.size() - 1) {
@@ -140,19 +150,24 @@ public class MatchingEngineServiceImpl implements MatchingEngineService {
                     waitingQueue.remove(itemA.address);
                     waitingQueue.remove(itemB.address);
 
-                    log.info("Matched: {}(type={}) vs {}(type={}), amount: {}",
+                    log.info("✅ 成功匹配: {}(type={}) vs {}(type={}), amount: {}",
                             itemA.address, getUserTypeDesc(userTypeA),
                             itemB.address, getUserTypeDesc(userTypeB),
                             itemA.amount);
 
                     i++;
                     j++;
-                } else if (itemA.amount.compareTo(itemB.amount) < 0) {
-                    // A 的金额较小，跳过 A
-                    i++;
                 } else {
-                    // B 的金额较小，跳过 B
-                    j++;
+                    log.info("✗ 金额不匹配: A={} vs B={}", itemA.amount, itemB.amount);
+                    if (itemA.amount.compareTo(itemB.amount) < 0) {
+                        // A 的金额较小，跳过 A
+                        log.info("  → A金额较小，跳过A");
+                        i++;
+                    } else {
+                        // B 的金额较小，跳过 B
+                        log.info("  → B金额较小，跳过B");
+                        j++;
+                    }
                 }
             }
 
@@ -161,6 +176,7 @@ public class MatchingEngineServiceImpl implements MatchingEngineService {
             processedPairs.add(reversePair);
         }
 
+        log.info("========== 匹配引擎执行完成，共找到 {} 个匹配 ==========", matches.size());
         return matches;
     }
 

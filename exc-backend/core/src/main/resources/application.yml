@@ -39,6 +39,36 @@ spring:
       idle-connection-timeout: 10000
       connect-timeout: 10000
       timeout: 3000
+  rabbitmq:
+    host: 127.0.0.1
+    port: 5672
+    username: guest
+    password: guest
+    virtual-host: /
+    # 生产者确认模式
+    publisher-confirm-type: correlated
+    publisher-returns: true
+    # 消费者配置
+    listener:
+      simple:
+        # 手动 ACK 模式
+        acknowledge-mode: manual
+        # 最小并发消费者数
+        concurrency: 3
+        # 最大并发消费者数
+        max-concurrency: 10
+        # 每次预取消息数（限流）
+        prefetch: 1
+        # 消费失败后是否重新入队
+        default-requeue-rejected: false
+        # 重试配置
+        retry:
+          enabled: true
+          initial-interval: 3000
+          max-attempts: 3
+          max-interval: 10000
+          multiplier: 2
+
 
 # Web3j 配置
 web3j:
@@ -47,6 +77,9 @@ web3j:
   private-key: c20eea3133007bbf18c1b2221029695e9ba385930864e8c2f5e7489e2c3d9ec3
   gas-price: 20000000000
   gas-limit: 4000000
+  # 新增的 Web3j 超时配置 (毫秒)
+  connect-timeout: 30000 # 连接超时 30 秒
+  read-timeout: 120000   # 读取超时 120 秒
   ens:
     enabled: false  # 禁用ENS解析
 
@@ -55,26 +88,34 @@ jwt:
   secret: mySecretKeyForJwtTokenGenerationAndValidation123456
   expiration: 604800000  # 7 天（毫秒）
 
+graphql:
+  endpoint: https://api.studio.thegraph.com/query/1747938/exchange-system-2/v0.0.2
+
+# Blockchain 配置
+blockchain:
+  contracts:
+    multiSigWallet: '0xCf575fea4D4a07d989775867F368C5EC976d9DEa'
 # 合约地址配置
 contract:
   exchange:
-    address: '0xD29A830C4CfC0D9fF017Fbb14B572a9a2F9b2930'
+    address: '0x206d9f0d53a1E81eedC369F5cb92B61Fb82e81bc'
   exth:
-    address: '0xD74347dE964F59f40d55761e9e1e82aBB57F7533'
+    address: '0xA31B600c7e21426C6bAFBf75F2a7860eAdA41A8F'
   usdt:
-    address: '0xaCc2AAC99533e857fBC7091821E74465cE019806'
+    address: '0x49c90445165e5C16FbE51B41158cEBA8aCd1C6Bf'
   rnb:
-    address: '0x2797CB961104B32e81EE2E3E559433f9dB141aD3'
+    address: '0xD46079d05B64E53a7Ba2A20e91316221722223ce'
   gbp:
-    address: '0x1FCD9dbC44862dD83d395C8386A1e850A0C488e9'
+    address: '0x00fbcD42C3EDEF826afBa6dB9D0feCd79F38e19d'
   treasure:
-    address: '0x42D15000E8A7dCBA6a9416960864F3dD46Be2fE9'
+    address: '0x88cC2f221042A7b6FDe00dA0426e87565Da6d52A'
   dao:
-    address: '0xB5168879C3A8b71DD4645C22465D5f9106df433d'
+    address: '0xA68FabB48E24E5E6C7b2f1D16628A46AAdcC8BC1'
   timelock:
-    address: '0xFd2F6B0467adb7a140c7a6ff0cB701EA3dA39e87'
+    address: '0xA42f7c4f80aAaE5F561C359C64c05d18598F8523'
   airdrop:
-    address: '0x0894c5c63D6239241945e502b86F82ab5a4E3A52'
+    address: '0xcaD1F71C72EAf002Cb0CfF6c28008F2c1e034893'
+
 
 mybatis-plus:
   configuration:

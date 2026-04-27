@@ -43,11 +43,11 @@ public interface BlockchainService {
     BigDecimal getBalance(String address, String tokenSymbol);
 
 
+    long syncAllEvents(long lastTimestamp);
 
-    /**
-     * 从链上同步用户 EXTH 余额到数据库
-     */
-    void updateExthBalanceOnChain(String address);
+    Long getLastSyncTimestamp();
+
+    void updateLastSyncTimestamp(long timestamp);
 
     /**
      * 链上链下数据对账（修复不一致状态）

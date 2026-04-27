@@ -6,7 +6,7 @@ import lombok.Data;
 
 @Data
 public class DisputeParam {
-    private String tradeId;
+    private String chainTradeId;
     private String initiator;
     private String accused;
     private String reason;

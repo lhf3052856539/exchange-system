@@ -92,17 +92,18 @@ export function useTrade() {
     function getStatusTag(status) {
         // 支持数字和字符串两种格式
         const statusMap = {
-            0: 'info',      // WAITING_MATCH
-            1: 'warning',   // MATCHED
-            2: 'primary',   // CONFIRMING_A - 等待甲方提交哈希
-            3: 'success',   // PARTY_A_CONFIRMED - 甲方已确认
-            4: 'primary',   // CONFIRMING_B - 等待乙方提交哈希
-            5: 'success',   // PARTY_B_CONFIRMED - 乙方已确认
-            6: 'warning',   // PENDING_CHAIN_CONFIRM - 待链上确认
-            7: 'success',   // COMPLETED - 已完成
-            8: 'danger',    // DISPUTED - 争议中
-            9: 'info',      // EXPIRED - 已过期
-            10: 'info'      // CANCELLED - 已取消
+            10: 'info',      // WAITING_MATCH
+            0: 'warning',   // MATCHED   -交易已创建，等待率先转账方转账
+            1: 'success',   // PARTY_A_CONFIRMED - 等待履约方确认转账
+            2: 'success',   // PARTY_B_CONFIRMED - 等待率先转账方确认
+
+            3: 'success',   // COMPLETED - 交易已完成
+            4: 'info' ,     // CANCELLED - 交易已取消
+            5: 'danger',    // DISPUTED - 交易存在争议
+            6: 'info',      //FAILED  - 交易争议已解决
+            7: 'info',      // EXPIRED - 交易已过期
+
+            8: 'warning'    // PENDING_CHAIN_CONFIRM - 等待链上确认
         }
 
         return statusMap[status] || 'info'
@@ -111,17 +112,17 @@ export function useTrade() {
     function getStatusText(status) {
         // 支持数字和字符串两种格式
         const textMap = {
-            0: '待匹配',          // WAITING_MATCH
-            1: '已匹配',          // MATCHED
-            2: '等待甲方转账',     // CONFIRMING_A - 等待甲方提交哈希
-            3: '等待乙方确认',     // PARTY_A_CONFIRMED - 甲方已确认，等待乙方
-            4: '等待乙方转账',     // CONFIRMING_B - 等待乙方提交哈希
-            5: '等待甲方最终确认', // PARTY_B_CONFIRMED - 乙方已确认，等待甲方
-            6: '待链上确认',      // PENDING_CHAIN_CONFIRM - 待链上确认
-            7: '已完成',          // COMPLETED - 已完成
-            8: '争议中',          // DISPUTED - 争议中
-            9: '已过期',          // EXPIRED - 已过期
-            10: '已取消'          // CANCELLED - 已取消
+            10: '待匹配',          // WAITING_MATCH
+            0: '交易已创建，等待率先转账方转账',          // MATCHED
+            1: '等待履约方确认转账',     // PARTY_A_CONFIRMED
+            2: '等待率先转账方最终确认', // PARTY_B_CONFIRMED
+            3: '交易已完成',          // COMPLETED
+            4: '交易已取消',          // CANCELLED
+            5: '交易存在争议',          // DISPUTED
+            6: '交易争议已解决',          // FAILED
+            7: '已过期',          // EXPIRED
+
+            8: '等待链上确认',      // PENDING_CHAIN_CONFIRM
         }
 
         return textMap[status] || status

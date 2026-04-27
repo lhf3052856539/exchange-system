@@ -23,12 +23,6 @@ public interface UserApi {
     );
 
     /**
-     * 用户注册
-     */
-    @PostMapping("/register")
-    JsonVO<UserDTO> register(@RequestParam String address);
-
-    /**
      * 获取用户信息
      */
     @GetMapping("/info")
@@ -40,10 +34,5 @@ public interface UserApi {
     @GetMapping("/trade-stats")
     JsonVO<UserTradeStatsDTO> getTradeStats(@CurrentUser String address);
 
-    /**
-     * 更新用户类型
-     */
-    @PostMapping("/update-type")
-    JsonVO<UserDTO> updateUserType(@PathVariable String address);
 
 }

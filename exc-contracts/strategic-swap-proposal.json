@@ -1,26 +1,26 @@
 {
-  "timestamp": "2026-03-31T07:17:47.537Z",
+  "timestamp": "2026-04-24T15:56:46.237Z",
   "proposalInfo": {
     "recommended": {
       "method": "Treasure.withdrawERC20",
-      "target": "0x42D15000E8A7dCBA6a9416960864F3dD46Be2fE9",
+      "target": "0x88cC2f221042A7b6FDe00dA0426e87565Da6d52A",
       "value": "0",
-      "calldata": "0x44004cc1000000000000000000000000d74347de964f59f40d55761e9e1e82abb57f7533000000000000000000000000b1a0d6ecefced03111de7844765ef4fc4b9c0c4b00000000000000000000000000000000000000000000000000b1a2bc2ec50000",
+      "calldata": "0x44004cc1000000000000000000000000a31b600c7e21426c6bafbf75f2a7860eada41a8f00000000000000000000000055aa462c2e7e43725a8496e41b8bc606ed62f37400000000000000000000000000000000000000000000000000b1a2bc2ec50000",
       "description": "Approve strategic investment - Transfer 0.05 EXTH to StrategicSwap contract"
     },
     "alternative": {
       "method": "EXTH.approve",
-      "target": "0xD74347dE964F59f40d55761e9e1e82aBB57F7533",
+      "target": "0xA31B600c7e21426C6bAFBf75F2a7860eAdA41A8F",
       "value": "0",
-      "calldata": "0x095ea7b3000000000000000000000000b1a0d6ecefced03111de7844765ef4fc4b9c0c4b00000000000000000000000000000000000000000000000000b1a2bc2ec50000",
+      "calldata": "0x095ea7b300000000000000000000000055aa462c2e7e43725a8496e41b8bc606ed62f37400000000000000000000000000000000000000000000000000b1a2bc2ec50000",
       "description": "Approve strategic investment - Authorize StrategicSwap to use 0.05 EXTH"
     }
   },
   "parameters": {
-    "exthToken": "0xD74347dE964F59f40d55761e9e1e82aBB57F7533",
-    "usdtToken": "0xaCc2AAC99533e857fBC7091821E74465cE019806",
-    "strategicSwap": "0xB1A0d6ecEFcED03111DE7844765ef4FC4b9C0c4B",
-    "treasure": "0x42D15000E8A7dCBA6a9416960864F3dD46Be2fE9",
+    "exthToken": "0xA31B600c7e21426C6bAFBf75F2a7860eAdA41A8F",
+    "usdtToken": "0x49c90445165e5C16FbE51B41158cEBA8aCd1C6Bf",
+    "strategicSwap": "0x55aa462C2E7E43725A8496e41b8BC606eD62F374",
+    "treasure": "0x88cC2f221042A7b6FDe00dA0426e87565Da6d52A",
     "exthAmount": "50000000000000000",
     "exthAmountFormatted": "0.05"
   }

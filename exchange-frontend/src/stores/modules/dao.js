@@ -13,27 +13,28 @@ import {
     getDaoStats
 } from '@/api/dao'
 import { useWalletStore } from './wallet'
+import { ethers } from 'ethers'
 
 // 提案状态枚举
 export const ProposalState = {
-    Pending: 0,      // 待开始
+    Pending: 0,      // 提案已创建，等待投票中
     Active: 1,       // 投票中
-    Succeeded: 2,    // 投票通过
-    Failed: 3,       // 失败
-    Queued: 4,       // 已入队列
-    Executed: 5,     // 已执行
-    Cancelled: 6     // 已取消
+    Succeeded: 2,    // 等待加入公示期
+    Failed: 3,       // 提案失败
+    Queued: 4,       // 公示期中
+    Executed: 5,     // 提案已执行
+    Cancelled: 6     // 提案已取消
 }
 
 // 提案状态文本映射
 export const ProposalStateText = {
-    [ProposalState.Pending]: '待开始',
+    [ProposalState.Pending]: '提案已创建，等待投票中',
     [ProposalState.Active]: '投票中',
-    [ProposalState.Succeeded]: '已通过',
-    [ProposalState.Failed]: '已失败',
+    [ProposalState.Succeeded]: '等待加入公示期',
+    [ProposalState.Failed]: '提案失败',
     [ProposalState.Queued]: '公示期中',
-    [ProposalState.Executed]: '已执行',
-    [ProposalState.Cancelled]: '已取消'
+    [ProposalState.Executed]: '提案已执行',
+    [ProposalState.Cancelled]: '提案已取消'
 }
 
 // 提案状态标签类型映射
@@ -147,8 +148,47 @@ export const useDaoStore = defineStore('dao', {
                 throw new Error('Wallet not connected')
             }
 
-            const res = await createProposal(address, proposalData)
-            return res.data
+            // 1. 先调用后端做参数校验
+            await createProposal(address, proposalData)
+            console.log('✅ 后端校验通过，开始链上交易...')
+
+            // 2. 调用链上合约创建提案
+            const DAO_ADDRESS = import.meta.env.VITE_DAO_CONTRACT_ADDRESS
+            if (!DAO_ADDRESS) {
+                throw new Error('DAO 合约地址未配置')
+            }
+
+            const DAO_ABI = [
+                'function propose(address targetContract, uint256 value, bytes callData, string description) external returns (uint256)'
+            ]
+
+            const provider = new ethers.BrowserProvider(window.ethereum)
+            const signer = await provider.getSigner()
+            const contract = new ethers.Contract(DAO_ADDRESS, DAO_ABI, signer)
+
+            console.log('📤 发送链上交易...')
+            console.log('目标合约:', proposalData.targetContract)
+            console.log('ETH 数量:', proposalData.value)
+            console.log('调用数据:', proposalData.callData)
+            console.log('描述:', proposalData.description)
+
+            const tx = await contract.propose(
+                proposalData.targetContract,
+                ethers.parseEther(proposalData.value.toString()),
+                proposalData.callData || '0x',
+                proposalData.description
+            )
+
+            console.log('🔄 交易已发送:', tx.hash)
+            console.log('⏳ 等待交易确认...')
+
+            const receipt = await tx.wait()
+            console.log('✅ 交易已确认:', receipt.transactionHash)
+
+            // 3. 刷新提案列表（后端监听器会自动同步）
+            await this.loadProposals()
+
+            return { txHash: receipt.transactionHash }
         },
 
         /**
@@ -181,9 +221,32 @@ export const useDaoStore = defineStore('dao', {
                 throw new Error('Wallet not connected')
             }
 
-            const res = await queueProposal(address, proposalId)
+            await queueProposal(address, proposalId)
+            console.log('✅ 后端校验通过，开始链上交易...')
+
+            const DAO_ADDRESS = import.meta.env.VITE_DAO_CONTRACT_ADDRESS
+            if (!DAO_ADDRESS) {
+                throw new Error('DAO 合约地址未配置')
+            }
+
+            const DAO_ABI = [
+                'function queue(uint256 proposalId) external'
+            ]
+
+            const provider = new ethers.BrowserProvider(window.ethereum)
+            const signer = await provider.getSigner()
+            const contract = new ethers.Contract(DAO_ADDRESS, DAO_ABI, signer)
+
+            console.log('📤 发送链上 queue 交易...')
+            const tx = await contract.queue(proposalId)
+            console.log('🔄 交易已发送:', tx.hash)
+
+            const receipt = await tx.wait()
+            console.log('✅ 交易已确认:', receipt.transactionHash)
+
             await this.loadProposalDetail(proposalId)
-            return res.data
+
+            return { txHash: receipt.transactionHash }
         },
 
         /**
@@ -197,9 +260,32 @@ export const useDaoStore = defineStore('dao', {
                 throw new Error('Wallet not connected')
             }
 
-            const res = await executeProposal(address, proposalId)
+            await executeProposal(address, proposalId)
+            console.log('✅ 后端校验通过，开始链上交易...')
+
+            const DAO_ADDRESS = import.meta.env.VITE_DAO_CONTRACT_ADDRESS
+            if (!DAO_ADDRESS) {
+                throw new Error('DAO 合约地址未配置')
+            }
+
+            const DAO_ABI = [
+                'function execute(uint256 proposalId) external payable'
+            ]
+
+            const provider = new ethers.BrowserProvider(window.ethereum)
+            const signer = await provider.getSigner()
+            const contract = new ethers.Contract(DAO_ADDRESS, DAO_ABI, signer)
+
+            console.log('📤 发送链上 execute 交易...')
+            const tx = await contract.execute(proposalId)
+            console.log('🔄 交易已发送:', tx.hash)
+
+            const receipt = await tx.wait()
+            console.log('✅ 交易已确认:', receipt.transactionHash)
+
             await this.loadProposalDetail(proposalId)
-            return res.data
+
+            return { txHash: receipt.transactionHash }
         },
 
         /**

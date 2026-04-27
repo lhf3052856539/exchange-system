@@ -1,7 +1,9 @@
 package com.mnnu.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.mnnu.config.CurrentUser;
+import com.mnnu.constant.SystemConstants;
 import com.mnnu.dto.CreateProposalDTO;
 import com.mnnu.dto.PageDTO;
 import com.mnnu.dto.ProposalDTO;
@@ -11,36 +13,41 @@ import com.mnnu.mapper.ProposalRecordMapper;
 import com.mnnu.service.BlockchainService;
 import com.mnnu.service.DaoService;
 import com.mnnu.wrapper.DaoWrapper;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.redisson.api.RLock;
+import org.redisson.api.RedissonClient;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.web3j.crypto.Credentials;
-import org.web3j.model.Dao;
+import org.web3j.model.EXTH;
 import org.web3j.protocol.Web3j;
-import org.web3j.protocol.core.methods.response.EthGetTransactionReceipt;
-import org.web3j.protocol.core.methods.response.TransactionReceipt;
 
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CompletableFuture;
+
+import static com.mnnu.constant.SystemConstants.RedisKey.DAO_SYNC_LOCK_KEY_PREFIX;
+import static java.util.concurrent.TimeUnit.SECONDS;
+
 /**
  * DAO 服务实现类
  */
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class DaoServiceImpl implements DaoService {
 
-    private final DaoWrapper daoWrapper;
-
-    private final BlockchainService blockchainService;
-
+    @Autowired
+    private DaoWrapper daoWrapper;
+    @Autowired
+    private RedissonClient redissonClient;
+    @Autowired
+    private BlockchainService blockchainService;
 
     @Autowired
     private ProposalRecordMapper proposalRecordMapper;
@@ -49,84 +56,15 @@ public class DaoServiceImpl implements DaoService {
 
 
     private static final String[] PROPOSAL_STATE_DESC = {
-            "待开始",
+            "提案已创建，等待投票中",
             "投票中",
-            "投票通过",
-            "投票失败",
-            "已加入队列",
-            "已执行",
-            "已取消"
+            "等待加入公示期",
+            "提案失败",
+            "公示期中",
+            "提案已执行",
+            "提案已取消"
     };
 
-    /**
-     * 异步保存提案快照到数据库
-     */
-    private void asyncSaveProposalSnapshot(CreateProposalDTO dto, String txHash, String proposalId, String proposerAddress) {
-        CompletableFuture.runAsync(() -> {
-            try {
-                // 等待几秒让链上确认
-                Thread.sleep(3000);
-
-                // 从链上获取最新的提案信息
-                DaoWrapper.ProposalInfo proposalInfo = daoWrapper.getProposal(new BigInteger(proposalId));
-
-                ProposalRecordEntity record = new ProposalRecordEntity();
-                record.setProposalId(proposalId);
-                record.setTxHash(txHash);
-                record.setDescription(dto.getDescription());
-                record.setProposer(proposerAddress);
-                record.setTargetContract(dto.getTargetContract());
-                record.setValue(dto.getValue() != null ? dto.getValue() : BigDecimal.ZERO);
-                record.setCallData(dto.getCallData());
-                record.setStatus(0); // 待开始
-
-                // 同步链上数据到数据库
-                record.setYesVotes(new BigDecimal(proposalInfo.yesVotes != null ? proposalInfo.yesVotes : BigInteger.ZERO));
-                record.setNoVotes(new BigDecimal(proposalInfo.noVotes != null ? proposalInfo.noVotes : BigInteger.ZERO));
-                record.setDeadline(proposalInfo.deadline != null ? proposalInfo.deadline.longValue() : null);
-                record.setSnapshotBlock(proposalInfo.snapshotBlock != null ? proposalInfo.snapshotBlock.longValue() : null);
-
-                record.setCreatedAt(LocalDateTime.now());
-
-                proposalRecordMapper.insert(record);
-                log.info(" Proposal saved to DB with chain data: id={}, txHash={}, deadline={}, yesVotes={}, noVotes={}",
-                        proposalId, txHash, record.getDeadline(),
-                        record.getYesVotes(), record.getNoVotes());
-            } catch (Exception e) {
-                log.warn(" Failed to save proposal to DB", e);
-            }
-        });
-    }
-
-    /**
-     * 从交易哈希中解析出提案ID
-     */
-    private BigInteger getProposalIdFromTx(String txHash) throws Exception {
-        // 获取交易收据
-        EthGetTransactionReceipt ethReceipt = web3j.ethGetTransactionReceipt(txHash).send();
-        if (!ethReceipt.getTransactionReceipt().isPresent()) {
-            throw new RuntimeException("获取交易收据失败: " + txHash);
-        }
-
-        TransactionReceipt receipt = ethReceipt.getTransactionReceipt().get();
-        if (receipt == null) {
-            throw new RuntimeException("交易收据未找到: " + txHash);
-        }
-
-        log.info("交易收据包含 {} 个日志", receipt.getLogs().size());
-        for (int i = 0; i < receipt.getLogs().size(); i++) {
-            log.info("日志 {}: {}", i, receipt.getLogs().get(i));
-        }
-
-        // 解析ProposalCreated事件 - 使用daoWrapper的公共方法
-        List<Dao.ProposalCreatedEventResponse> events = daoWrapper.getProposalCreatedEvents(receipt);
-        if (events.isEmpty()) {
-            throw new RuntimeException("未找到ProposalCreated事件");
-        }
-
-        // 返回第一个事件的提案ID
-        return events.get(0).proposalId;
-    }
     @Override
     public void createProposal(CreateProposalDTO proposalDTO, @CurrentUser String currentAddress) {
         // 基础参数校验
@@ -176,106 +114,151 @@ public class DaoServiceImpl implements DaoService {
 
     @Override
     public void vote(BigInteger proposalId, boolean support, String voterAddress) {
-        LambdaQueryWrapper<ProposalRecordEntity> wrapper = new LambdaQueryWrapper<>();
-        wrapper.eq(ProposalRecordEntity::getProposalId, proposalId.toString());
-        ProposalRecordEntity dbRecord = proposalRecordMapper.selectOne(wrapper);
-
-        if (dbRecord == null) {
-            throw new BusinessException("Proposal not found");
-        }
-
-        int state = dbRecord.getStatus();
-        if (state != 1) {
-            throw new BusinessException("Proposal is not active. Current state: " + PROPOSAL_STATE_DESC[state]);
-        }
-
-        if (dbRecord.getDeadline() != null) {
-            long now = System.currentTimeMillis() / 1000;
-            if (now >= dbRecord.getDeadline()) {
-                throw new BusinessException("Voting period has ended");
-            }
-        }
-
+        RLock lock = redissonClient.getLock(SystemConstants.RedisKey.TRADE_LOCK_KEY_PREFIX + "dao:vote:" + proposalId);
         try {
-            Boolean alreadyVoted = daoWrapper.hasVoted(proposalId, voterAddress);
-            if (alreadyVoted) {
-                throw new BusinessException("Already voted");
+            if (!lock.tryLock(10, 30, SECONDS)) {
+                throw new BusinessException("System busy, try again");
             }
-            String exthAddress = blockchainService.getExthContractAddress();
-            org.web3j.model.EXTH exthContract = org.web3j.model.EXTH.load(
-                    exthAddress,
-                    web3j,
-                    (Credentials) null,
-                    null
-            );
 
-            BigInteger votingPower = exthContract.getVotes(voterAddress).send();
-            if (votingPower.compareTo(BigInteger.ZERO) <= 0) {
-                throw new BusinessException("No voting power. Please delegate your EXTH tokens first");
+            LambdaQueryWrapper<ProposalRecordEntity> wrapper = new LambdaQueryWrapper<>();
+            wrapper.eq(ProposalRecordEntity::getProposalId, proposalId.toString());
+            ProposalRecordEntity dbRecord = proposalRecordMapper.selectOne(wrapper);
+
+            if (dbRecord == null) {
+                throw new BusinessException("Proposal not found");
             }
-        } catch (BusinessException e) {
-            throw e;
-        } catch (Exception e) {
-            log.warn("Failed to check voting eligibility", e);
+
+            int state = dbRecord.getStatus();
+            if (state != 1) {
+                throw new BusinessException("Proposal is not active. Current state: " + PROPOSAL_STATE_DESC[state]);
+            }
+
+            if (dbRecord.getDeadline() != null) {
+                long now = System.currentTimeMillis() / 1000;
+                if (now >= dbRecord.getDeadline()) {
+                    throw new BusinessException("Voting period has ended");
+                }
+            }
+
+            try {
+                Boolean alreadyVoted = daoWrapper.hasVoted(proposalId, voterAddress);
+                if (alreadyVoted) {
+                    throw new BusinessException("Already voted");
+                }
+                String exthAddress = blockchainService.getExthContractAddress();
+                EXTH exthContract = EXTH.load(
+                        exthAddress,
+                        web3j,
+                        (Credentials) null,
+                        null
+                );
+
+                BigInteger votingPower = exthContract.getVotes(voterAddress).send();
+                if (votingPower.compareTo(BigInteger.ZERO) <= 0) {
+                    throw new BusinessException("No voting power. Please delegate your EXTH tokens first");
+                }
+            } catch (BusinessException e) {
+                throw e;
+            } catch (Exception e) {
+                log.warn("Failed to check voting eligibility", e);
+            }
+
+            log.info("DAO vote pre-check passed for proposal: {}, voter: {}", proposalId, voterAddress);
+
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new BusinessException(500, "System error");
+        } finally {
+            if (lock.isHeldByCurrentThread()) {
+                lock.unlock();
+            }
         }
-
-        log.info("DAO vote pre-check passed for proposal: {}, voter: {}", proposalId, voterAddress);
     }
 
 
     @Override
     public void queueProposal(BigInteger proposalId) {
-        LambdaQueryWrapper<ProposalRecordEntity> wrapper = new LambdaQueryWrapper<>();
-        wrapper.eq(ProposalRecordEntity::getProposalId, proposalId.toString());
-        ProposalRecordEntity dbRecord = proposalRecordMapper.selectOne(wrapper);
+        RLock lock = redissonClient.getLock(SystemConstants.RedisKey.TRADE_LOCK_KEY_PREFIX + "dao:queue:" + proposalId);
+        try {
+            if (!lock.tryLock(10, 30, SECONDS)) {
+                throw new BusinessException("System busy, try again");
+            }
 
-        if (dbRecord == null) {
-            throw new BusinessException("Proposal not found");
-        }
+            LambdaQueryWrapper<ProposalRecordEntity> wrapper = new LambdaQueryWrapper<>();
+            wrapper.eq(ProposalRecordEntity::getProposalId, proposalId.toString());
+            ProposalRecordEntity dbRecord = proposalRecordMapper.selectOne(wrapper);
 
-        int state = dbRecord.getStatus();
-        if (state != 2) {
-            throw new BusinessException("Proposal must succeed before queuing. Current state: " + PROPOSAL_STATE_DESC[state]);
-        }
+            if (dbRecord == null) {
+                throw new BusinessException("Proposal not found");
+            }
 
-        if (dbRecord.getDeadline() != null) {
-            long now = System.currentTimeMillis() / 1000;
-            if (now < dbRecord.getDeadline()) {
-                throw new BusinessException("Voting period has not ended yet");
+            int state = dbRecord.getStatus();
+            if (state != 1) {
+                throw new BusinessException("Proposal must succeed before queuing. Current state: " + PROPOSAL_STATE_DESC[state]);
+            }
+
+            if (dbRecord.getDeadline() != null) {
+                long now = System.currentTimeMillis() / 1000;
+                if (now < dbRecord.getDeadline()) {
+                    throw new BusinessException("Voting period has not ended yet");
+                }
+            }
+
+            if (dbRecord.getYesVotes().compareTo(dbRecord.getNoVotes()) <= 0) {
+                throw new BusinessException("Proposal did not pass the vote");
+            }
+
+            log.info("DAO queue pre-check passed for proposal: {}", proposalId);
+
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new BusinessException(500, "System error");
+        } finally {
+            if (lock.isHeldByCurrentThread()) {
+                lock.unlock();
             }
         }
-
-        if (dbRecord.getYesVotes().compareTo(dbRecord.getNoVotes()) <= 0) {
-            throw new BusinessException("Proposal did not pass the vote");
-        }
-
-        log.info("DAO queue pre-check passed for proposal: {}", proposalId);
     }
 
 
 
     @Override
     public void executeProposal(BigInteger proposalId, BigInteger eta) {
-        LambdaQueryWrapper<ProposalRecordEntity> wrapper = new LambdaQueryWrapper<>();
-        wrapper.eq(ProposalRecordEntity::getProposalId, proposalId.toString());
-        ProposalRecordEntity dbRecord = proposalRecordMapper.selectOne(wrapper);
+        RLock lock = redissonClient.getLock(SystemConstants.RedisKey.TRADE_LOCK_KEY_PREFIX + "dao:execute:" + proposalId);
+        try {
+            if (!lock.tryLock(10, 30, SECONDS)) {
+                throw new BusinessException("System busy, try again");
+            }
 
-        if (dbRecord == null) {
-            throw new BusinessException("Proposal not found");
+            LambdaQueryWrapper<ProposalRecordEntity> wrapper = new LambdaQueryWrapper<>();
+            wrapper.eq(ProposalRecordEntity::getProposalId, proposalId.toString());
+            ProposalRecordEntity dbRecord = proposalRecordMapper.selectOne(wrapper);
+
+            if (dbRecord == null) {
+                throw new BusinessException("Proposal not found");
+            }
+
+            int state = dbRecord.getStatus();
+            if (state != 4) {
+                throw new BusinessException("Proposal is not queued. Current state: " + PROPOSAL_STATE_DESC[state]);
+            }
+
+            long now = System.currentTimeMillis() / 1000;
+            if (dbRecord.getDeadline() != null && now < dbRecord.getDeadline()) {
+                long waitSeconds = dbRecord.getDeadline() - now;
+                throw new BusinessException("Timelock delay not met. Wait " + waitSeconds + " seconds");
+            }
+
+            log.info("DAO execute pre-check passed for proposal: {}", proposalId);
+
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new BusinessException(500, "System error");
+        } finally {
+            if (lock.isHeldByCurrentThread()) {
+                lock.unlock();
+            }
         }
-
-        int state = dbRecord.getStatus();
-        if (state != 4) {
-            throw new BusinessException("Proposal is not queued. Current state: " + PROPOSAL_STATE_DESC[state]);
-        }
-
-        long now = System.currentTimeMillis() / 1000;
-        if (dbRecord.getDeadline() != null && now < dbRecord.getDeadline()) {
-            long waitSeconds = dbRecord.getDeadline() - now;
-            throw new BusinessException("Timelock delay not met. Wait " + waitSeconds + " seconds");
-        }
-
-        log.info("DAO execute pre-check passed for proposal: {}", proposalId);
     }
 
     // 添加辅助方法
@@ -293,24 +276,39 @@ public class DaoServiceImpl implements DaoService {
 
     @Override
     public void cancelProposal(BigInteger proposalId, String callerAddress) {
-        LambdaQueryWrapper<ProposalRecordEntity> wrapper = new LambdaQueryWrapper<>();
-        wrapper.eq(ProposalRecordEntity::getProposalId, proposalId.toString());
-        ProposalRecordEntity dbRecord = proposalRecordMapper.selectOne(wrapper);
+        RLock lock = redissonClient.getLock(SystemConstants.RedisKey.TRADE_LOCK_KEY_PREFIX + "dao:cancel:" + proposalId);
+        try {
+            if (!lock.tryLock(10, 30, SECONDS)) {
+                throw new BusinessException("System busy, try again");
+            }
 
-        if (dbRecord == null) {
-            throw new BusinessException("Proposal not found");
+            LambdaQueryWrapper<ProposalRecordEntity> wrapper = new LambdaQueryWrapper<>();
+            wrapper.eq(ProposalRecordEntity::getProposalId, proposalId.toString());
+            ProposalRecordEntity dbRecord = proposalRecordMapper.selectOne(wrapper);
+
+            if (dbRecord == null) {
+                throw new BusinessException("Proposal not found");
+            }
+
+            int state = dbRecord.getStatus();
+            if (state != 0 && state != 1) {
+                throw new BusinessException("Can only cancel pending or active proposals. Current state: " + PROPOSAL_STATE_DESC[state]);
+            }
+
+            if (!callerAddress.equalsIgnoreCase(dbRecord.getProposer())) {
+                throw new BusinessException("Only the proposer can cancel the proposal");
+            }
+
+            log.info("DAO cancel pre-check passed for proposal: {}, caller: {}", proposalId, callerAddress);
+
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new BusinessException(500, "System error");
+        } finally {
+            if (lock.isHeldByCurrentThread()) {
+                lock.unlock();
+            }
         }
-
-        int state = dbRecord.getStatus();
-        if (state != 0 && state != 1) {
-            throw new BusinessException("Can only cancel pending or active proposals. Current state: " + PROPOSAL_STATE_DESC[state]);
-        }
-
-        if (!callerAddress.equalsIgnoreCase(dbRecord.getProposer())) {
-            throw new BusinessException("Only the proposer can cancel the proposal");
-        }
-
-        log.info("DAO cancel pre-check passed for proposal: {}, caller: {}", proposalId, callerAddress);
     }
 
 
@@ -318,37 +316,38 @@ public class DaoServiceImpl implements DaoService {
     @Override
     public ProposalDTO getProposal(BigInteger proposalId, String address) {
         try {
-            // 优先从数据库获取基础信息
             ProposalRecordEntity dbRecord = proposalRecordMapper.selectOne(
                     new LambdaQueryWrapper<ProposalRecordEntity>().eq(ProposalRecordEntity::getProposalId, proposalId.toString())
             );
 
-            // 从链上获取实时状态和票数
-            DaoWrapper.ProposalInfo info = daoWrapper.getProposal(proposalId);
-            int state = daoWrapper.getProposalState(proposalId).intValue();
+            if (dbRecord == null) {
+                throw new BusinessException("提案不存在");
+            }
 
             ProposalDTO dto = new ProposalDTO();
-            dto.setProposalId(proposalId);
-            dto.setDescription(info.description != null ? info.description : (dbRecord != null ? dbRecord.getDescription() : ""));
-            dto.setProposer(dbRecord != null ? dbRecord.getProposer() : info.proposer);
-            dto.setYesVotes(info.yesVotes);
-            dto.setNoVotes(info.noVotes);
-            dto.setDeadline(info.deadline);
-            dto.setState(state);
-            dto.setStateDesc(PROPOSAL_STATE_DESC[state]);
+            dto.setProposalId(new BigInteger(dbRecord.getProposalId()));
+            dto.setDescription(dbRecord.getDescription());
+            dto.setProposer(dbRecord.getProposer());
+            dto.setYesVotes(dbRecord.getYesVotes().toBigInteger());
+            dto.setNoVotes(dbRecord.getNoVotes().toBigInteger());
+            dto.setDeadline(BigInteger.valueOf(dbRecord.getDeadline()));
+            dto.setState(dbRecord.getStatus());
+            dto.setStateDesc(PROPOSAL_STATE_DESC[dbRecord.getStatus()]);
+            dto.setTargetContract(dbRecord.getTargetContract());
+            dto.setValue(dbRecord.getValue() != null ? dbRecord.getValue().toBigInteger() : BigInteger.ZERO);
+            dto.setCallData(dbRecord.getCallData());
+            dto.setEta(dbRecord.getEta() != null ? BigInteger.valueOf(dbRecord.getEta()) : null);
+            dto.setSnapshotBlock(dbRecord.getSnapshotBlock() != null ? BigInteger.valueOf(dbRecord.getSnapshotBlock()) : null);
 
-            // 计算公示期剩余时间
-            if (state == 4 && info.eta != null) {
-                long remaining = info.eta.longValue() - (System.currentTimeMillis() / 1000);
-                dto.setEta(info.eta);
-                // 可以在 DTO 里加个字段存剩余秒数
+            if (dbRecord.getCreatedAt() != null) {
+                dto.setStartTime(BigInteger.valueOf(dbRecord.getCreatedAt().atZone(java.time.ZoneId.systemDefault()).toEpochSecond()));
             }
 
-            if (address != null) {
-                dto.setHasVoted(daoWrapper.hasVoted(proposalId, address));
-            }
+            dto.setHasVoted(false);
 
             return dto;
+        } catch (BusinessException e) {
+            throw e;
         } catch (Exception e) {
             log.error("Failed to get proposal details", e);
             throw new BusinessException("获取提案详情失败");
@@ -360,30 +359,37 @@ public class DaoServiceImpl implements DaoService {
     @Override
     public PageDTO<ProposalDTO> getAllProposals(Integer pageNum, Integer pageSize, String address) {
         try {
-            BigInteger count = daoWrapper.getProposalCount();
-            int total = count.intValue();
+            LambdaQueryWrapper<ProposalRecordEntity> wrapper = new LambdaQueryWrapper<>();
+            wrapper.orderByDesc(ProposalRecordEntity::getId);
 
-            int fromIndex = (pageNum - 1) * pageSize;
-            int toIndex = Math.min(fromIndex + pageSize, total);
+            Page<ProposalRecordEntity> page = new Page<>(pageNum, pageSize);
+            Page<ProposalRecordEntity> resultPage = proposalRecordMapper.selectPage(page, wrapper);
 
             List<ProposalDTO> rows = new ArrayList<>();
+            for (ProposalRecordEntity entity : resultPage.getRecords()) {
+                ProposalDTO dto = new ProposalDTO();
+                dto.setProposalId(new BigInteger(entity.getProposalId()));
+                dto.setDescription(entity.getDescription());
+                dto.setProposer(entity.getProposer());
+                dto.setTargetContract(entity.getTargetContract());
+                dto.setValue(entity.getValue() != null ? entity.getValue().toBigInteger() : BigInteger.ZERO);
+                dto.setCallData(entity.getCallData());
+                dto.setYesVotes(entity.getYesVotes() != null ? entity.getYesVotes().toBigInteger() : BigInteger.ZERO);
+                dto.setNoVotes(entity.getNoVotes() != null ? entity.getNoVotes().toBigInteger() : BigInteger.ZERO);
+                dto.setDeadline(BigInteger.valueOf(entity.getDeadline()));
+                dto.setState(entity.getStatus());
+                dto.setStateDesc(PROPOSAL_STATE_DESC[entity.getStatus()]);
+                dto.setEta(entity.getEta() != null ? BigInteger.valueOf(entity.getEta()) : null);
+                dto.setSnapshotBlock(entity.getSnapshotBlock() != null ? BigInteger.valueOf(entity.getSnapshotBlock()) : null);
 
-            if (fromIndex < total) {
-                for (int i = fromIndex; i < toIndex; i++) {
-                    try {
-                        ProposalDTO dto = getProposal(BigInteger.valueOf(i), address);
-                        rows.add(dto);
-                    } catch (Exception e) {
-                        log.warn("Failed to load proposal {}, skipping", i, e);
-                    }
-                }
+                rows.add(dto);
             }
 
             PageDTO<ProposalDTO> pageDTO = new PageDTO<>();
-            pageDTO.setPageIndex((long) pageNum);
-            pageDTO.setPageSize((long) pageSize);
-            pageDTO.setTotal((long) total);
-            pageDTO.setPages((long) ((total + pageSize - 1) / pageSize));
+            pageDTO.setPageIndex(resultPage.getCurrent());
+            pageDTO.setPageSize(resultPage.getSize());
+            pageDTO.setTotal(resultPage.getTotal());
+            pageDTO.setPages(resultPage.getPages());
             pageDTO.setRows(rows);
 
             return pageDTO;
@@ -505,8 +511,25 @@ public class DaoServiceImpl implements DaoService {
     }
 
     @Override
-    public void syncProposalFromChain(String proposalId, String proposer, String txHash) {
+    @Transactional(rollbackFor = Exception.class)
+    public boolean syncProposalFromChain(String proposalId, String proposer, String txHash) {
+        RLock lock = redissonClient.getLock(DAO_SYNC_LOCK_KEY_PREFIX + proposalId);
         try {
+            if (!lock.tryLock(10, 30, SECONDS)) {
+                log.warn("Sync proposal {} skipped (locked)", proposalId);
+                return false;
+            }
+
+            // 先检查是否已存在
+            LambdaQueryWrapper<ProposalRecordEntity> wrapper = new LambdaQueryWrapper<>();
+            wrapper.eq(ProposalRecordEntity::getProposalId, proposalId);
+            ProposalRecordEntity existing = proposalRecordMapper.selectOne(wrapper);
+
+            if (existing != null) {
+                log.info("Proposal {} already exists, skip sync", proposalId);
+                return true;
+            }
+
             BigInteger id = new BigInteger(proposalId);
             DaoWrapper.ProposalInfo info = daoWrapper.getProposal(id);
 
@@ -530,33 +553,77 @@ public class DaoServiceImpl implements DaoService {
             record.setCreatedAt(LocalDateTime.ofEpochSecond(
                     info.deadline.longValue() - daoWrapper.getVotingPeriod().longValue(),
                     0,
-                    java.time.ZoneOffset.UTC
+                    ZoneOffset.ofHours(8)
             ));
 
-                proposalRecordMapper.updateById(record);
-                log.info(" Proposal {} updated from chain", proposalId);
+            int insertCount = proposalRecordMapper.insert(record);
+
+            if (insertCount > 0) {
+                log.info("Proposal {} inserted from chain", proposalId);
+                return true;
+            } else {
+                log.warn("Failed to insert proposal {}", proposalId);
+                return false;
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.error("Sync proposal {} interrupted", proposalId, e);
+            return false;
         } catch (Exception e) {
             log.error("Failed to sync proposal from chain: {}", proposalId, e);
+            return false;
+        } finally {
+            if (lock.isHeldByCurrentThread()) {
+                lock.unlock();
+            }
         }
     }
 
     @Override
-    public void syncProposalVotesFromChain(BigInteger proposalId) {
+    @Transactional(rollbackFor = Exception.class)
+    public boolean syncProposalVotesFromChain(BigInteger proposalId) {
+        RLock lock = redissonClient.getLock(DAO_SYNC_LOCK_KEY_PREFIX + proposalId);
         try {
+            if (!lock.tryLock(10, 30, SECONDS)) {
+                log.warn("Sync votes for proposal {} skipped (locked)", proposalId);
+                return false;
+            }
+
             DaoWrapper.ProposalInfo info = daoWrapper.getProposal(proposalId);
             LambdaQueryWrapper<ProposalRecordEntity> wrapper = new LambdaQueryWrapper<>();
             wrapper.eq(ProposalRecordEntity::getProposalId, proposalId.toString());
             ProposalRecordEntity dbRecord = proposalRecordMapper.selectOne(wrapper);
 
+            if (dbRecord == null) {
+                log.warn("Proposal record not found for ID: {}", proposalId);
+                return false;
+            }
+
             dbRecord.setYesVotes(new BigDecimal(info.yesVotes));
             dbRecord.setNoVotes(new BigDecimal(info.noVotes));
             dbRecord.setStatus(info.status);
 
-            proposalRecordMapper.updateById(dbRecord);
-            log.info("Votes synced for proposal {}: yes={}, no={}", proposalId, info.yesVotes, info.noVotes);
+            int updateCount = proposalRecordMapper.updateById(dbRecord);
 
+            if (updateCount > 0) {
+                log.info("Votes synced for proposal {}: yes={}, no={}", proposalId, info.yesVotes, info.noVotes);
+                return true;
+            } else {
+                log.warn("Failed to update votes for proposal {}", proposalId);
+                return false;
+            }
+
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.error("Sync votes for proposal {} interrupted", proposalId, e);
+            return false;
         } catch (Exception e) {
             log.error("Failed to sync votes for proposal {}", proposalId, e);
+            return false;
+        } finally {
+            if (lock.isHeldByCurrentThread()) {
+                lock.unlock();
+            }
         }
     }
 

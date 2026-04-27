@@ -35,9 +35,18 @@ import { useRouter } from 'vue-router'
 import { useUserStore } from '@/stores/modules/user'
 import { ethers } from 'ethers'
 import { ElMessage } from 'element-plus'
-import { register, getUserInfo, login } from '@/api/user' // 添加 login 函数
+import { login } from '@/api/user'
 import request from '@/utils/request'
 import { useWalletStore } from '@/stores/modules/wallet'
+import { WEB3_CONFIG } from '@/config/web3Config'
+
+// Exchange 合约地址
+const EXCHANGE_ADDRESS = WEB3_CONFIG.contractAddresses.Exchange
+
+// Exchange 合约最小 ABI (仅 registerUser)
+const EXCHANGE_ABI = [
+  'function registerUser() external'
+]
 
 const router = useRouter()
 const userStore = useUserStore()
@@ -70,58 +79,96 @@ const connectWallet = async () => {
     const signature = await signer.signMessage(message)
     localStorage.setItem('signature', signature)
 
-    // 先执行登录接口获取token
+// 尝试登录
     let token = null
     try {
       console.log('尝试登录获取token...')
       const loginRes = await login(address, signature)
+      console.log('登录接口完整响应:', JSON.stringify(loginRes))
 
-      // 处理不同格式的响应
-      token = typeof loginRes === 'string' ? loginRes : (loginRes.data || loginRes.token || loginRes)
+      // 检查后端返回的业务状态码
+      if (loginRes?.code === 400 && loginRes?.message === 'NOT_REGISTERED') {
+        console.log('用户未注册，开始链上注册...')
+        await registerOnChain(address, provider, signer)
 
-      if (token) {
+        // 注册成功后重新登录
+        console.log('注册完成，重新登录...')
+        const loginRes2 = await login(address, signature)
+        console.log('重新登录响应:', JSON.stringify(loginRes2))
+
+        if (loginRes2?.code !== 200) {
+          throw new Error('登录后获取 token 失败')
+        }
+
+        token = loginRes2.data
+        localStorage.setItem('token', token)
+      } else if (loginRes?.code === 200) {
+        // 正常登录成功
+        token = loginRes.data
         localStorage.setItem('token', token)
         console.log('✅ 登录成功，获取到token')
       } else {
-        console.log('⚠️ 登录接口返回但无token，可能是新用户')
+        throw new Error(loginRes?.message || '登录失败')
       }
     } catch (loginError) {
-      console.error('登录失败:', loginError)
-      // 登录失败可能是因为新用户，继续注册流程
-    }
+      console.error('登录流程异常:', loginError)
 
-    // 如果没有token，说明是新用户，执行注册
-    if (!token) {
-      try {
-        console.log('新用户，执行注册流程...')
-        const registerRes = await register(address)
+      // 情况1: axios 网络层错误（有 response 属性）
+      if (loginError.response) {
+        const errorMsg = loginError.response.data?.message
+        if (errorMsg === 'NOT_REGISTERED') {
+          console.log('捕获到 NOT_REGISTERED 错误，开始链上注册...')
+          await registerOnChain(address, provider, signer)
 
-        // 注册成功后应该已经有token
-        if (registerRes && registerRes.token) {
-          token = registerRes.token
+          // 注册成功后重新登录
+          console.log('注册完成，重新登录...')
+          const loginRes = await login(address, signature)
+
+          if (loginRes?.code !== 200) {
+            throw new Error('登录后获取 token 失败')
+          }
+
+          token = loginRes.data
           localStorage.setItem('token', token)
+        } else {
+          ElMessage.error('登录失败: ' + (errorMsg || '未知错误'))
+          return
+        }
+      }
+// 情况2: 业务逻辑抛出的 Error 对象（检查 message）
+      else if (loginError.message === 'NOT_REGISTERED') {
+        console.log('捕获到 NOT_REGISTERED 异常，开始链上注册...')
+        await registerOnChain(address, provider, signer)
+
+        // 注册成功后重新登录
+        console.log('注册完成，重新登录...')
+        const loginRes = await login(address, signature)
+        console.log('重新登录响应:', JSON.stringify(loginRes))
+
+        if (loginRes?.code !== 200) {
+          console.error('登录响应 code 不为 200:', loginRes)
+          throw new Error('登录后获取 token 失败')
         }
 
-        console.log('✅ 注册成功')
-      } catch (registerError) {
-        console.error('注册失败:', registerError)
-        ElMessage.error('注册或登录失败，请重试')
+        token = loginRes.data
+        console.log('提取到的 token:', token ? token.substring(0, 20) + '...' : 'null')
+        localStorage.setItem('token', token)
+      }
+      else {
+        // 其他错误
+        ElMessage.error(loginError.message || '登录失败，请重试')
         return
       }
     }
 
-    // 确保有 token 后，再加载用户信息
-    if (token) {
-      // 设置请求头中的 token
-      request.defaults.headers.common['Authorization'] = `Bearer ${token}`
 
-      // 设置钱包地址到 store
-      const walletStore = useWalletStore()
+    // 设置 token 和钱包信息
+    if (token) {
       walletStore.setWallet(address)
       localStorage.setItem('walletAddress', address)
 
       // 加载用户信息
-      await userStore.fetchUserInfo()
+      await userStore.fetchUserInfo(address)
       ElMessage.success('连接成功')
 
       setTimeout(() => {
@@ -134,11 +181,47 @@ const connectWallet = async () => {
       }, 500)
     }
 
+
+
   } catch (error) {
     console.error('连接钱包失败:', error)
-    ElMessage.error('连接钱包失败')
+    ElMessage.error(error.message || '连接钱包失败')
   } finally {
     connecting.value = false
+  }
+}
+
+// 链上注册用户
+const registerOnChain = async (address, provider, signer) => {
+  try {
+    ElMessage.info('正在链上注册用户...')
+
+    const contract = new ethers.Contract(EXCHANGE_ADDRESS, EXCHANGE_ABI, signer)
+
+    const tx = await contract.registerUser()
+    console.log('注册交易已发送:', tx.hash)
+
+    ElMessage.info('等待交易确认...')
+    const receipt = await tx.wait()
+
+    console.log('注册成功:', receipt)
+    ElMessage.success('链上注册成功')
+
+  } catch (error) {
+    console.error('链上注册失败:', error)
+
+    // 用户取消交易
+    if (error.code === 'ACTION_REJECTED') {
+      throw new Error('用户取消了注册交易')
+    }
+
+    // 已注册过
+    if (error.message.includes('Already registered')) {
+      console.log('用户已在链上注册')
+      return
+    }
+
+    throw new Error('链上注册失败: ' + (error.message || error.reason))
   }
 }
 </script>

@@ -3,7 +3,6 @@ package com.mnnu.service.impl;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.mnnu.dto.DisputeDTO;
 import com.mnnu.dto.DisputeParam;
-import com.mnnu.dto.ProposalDTO;
 import com.mnnu.entity.CommitteeMemberEntity;
 import com.mnnu.entity.DisputeRecordEntity;
 import com.mnnu.entity.TradeRecordEntity;
@@ -15,22 +14,28 @@ import com.mnnu.service.MultiSigWalletService;
 import com.mnnu.wrapper.MultiSigWalletWrapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.redisson.api.RLock;
+import org.redisson.api.RedissonClient;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.math.BigInteger;
-import java.time.LocalDateTime;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
+import static com.mnnu.constant.SystemConstants.RedisKey.*;
+import static java.util.concurrent.TimeUnit.SECONDS;
 
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class MultiSigWalletServiceImpl implements MultiSigWalletService {
+    @Autowired
+    private MultiSigWalletWrapper multiSigWalletWrapper;
+    @Autowired
+    private RedissonClient redissonClient;
 
-    private final MultiSigWalletWrapper multiSigWalletWrapper;
     @Autowired
     private TradeMapper tradeMapper;
     @Autowired
@@ -68,33 +73,62 @@ public class MultiSigWalletServiceImpl implements MultiSigWalletService {
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public void createArbitrationProposal(String creatorAddress, DisputeParam param) {
-        // 权限校验
-        if (!isCommitteeMember(creatorAddress)) {
-            throw new BusinessException("Only committee members can create proposals");
+        RLock lock = redissonClient.getLock(ARBITRATION_LOCK_KEY_PREFIX + param.getChainTradeId());
+        try {
+            if (!lock.tryLock(10, 30, SECONDS)) {
+                throw new BusinessException("System busy, try again");
+            }
+
+            // 权限校验
+            if (!isCommitteeMember(creatorAddress)) {
+                throw new BusinessException("Only committee members can create proposals");
+            }
+
+            // 业务数据校验
+            TradeRecordEntity trade = tradeMapper.selectOne(new QueryWrapper<TradeRecordEntity>().eq("chain_trade_id", param.getChainTradeId()));
+            if (trade == null) throw new BusinessException("Trade not found");
+
+            DisputeRecordEntity dispute = disputeRecordMapper.selectOne(new QueryWrapper<DisputeRecordEntity>().eq("chain_trade_id", param.getChainTradeId()));
+            if (dispute == null) throw new BusinessException("Dispute record not found");
+
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new BusinessException(500, "System error");
+        } finally {
+            if (lock.isHeldByCurrentThread()) {
+                lock.unlock();
+            }
         }
-
-        // 业务数据校验
-        TradeRecordEntity trade = tradeMapper.selectOne(new QueryWrapper<TradeRecordEntity>().eq("trade_id", param.getTradeId()));
-        if (trade == null) throw new BusinessException("Trade not found");
-
-        DisputeRecordEntity dispute = disputeRecordMapper.selectOne(new QueryWrapper<DisputeRecordEntity>().eq("trade_id", param.getTradeId()));
-        if (dispute == null) throw new BusinessException("Dispute record not found");
-
-
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public void voteArbitrationProposal(String voterAddress, BigInteger proposalId, boolean support) {
-        // 权限校验
-        if (!isCommitteeMember(voterAddress)) {
-            throw new BusinessException("Only committee members can vote");
-        }
+        RLock lock = redissonClient.getLock(ARBITRATION_LOCK_KEY_PREFIX + proposalId);
+        try {
+            if (!lock.tryLock(10, 30, SECONDS)) {
+                throw new BusinessException("System busy, try again");
+            }
 
+            // 权限校验
+            if (!isCommitteeMember(voterAddress)) {
+                throw new BusinessException("Only committee members can vote");
+            }
+
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new BusinessException(500, "System error");
+        } finally {
+            if (lock.isHeldByCurrentThread()) {
+                lock.unlock();
+            }
+        }
     }
 
     /**
-     * @notice 终结提案：处理超时未通过的提案
+     *终结提案：处理超时未通过的提案
      */
     @Override
     public String finalizeProposal(BigInteger proposalId) {
@@ -129,39 +163,38 @@ public class MultiSigWalletServiceImpl implements MultiSigWalletService {
 
     @Override
     public List<DisputeRecordEntity> getPendingDisputes() {
-        // 查询 proposal_status 为 0 (Pending) 的记录
         return disputeRecordMapper.selectList(
                 new QueryWrapper<DisputeRecordEntity>()
                         .eq("proposal_status", 0)
+                        .isNull("proposal_id")
                         .orderByDesc("create_time")
         );
     }
 
     @Override
     public List<DisputeRecordEntity> getPendingProposals() {
-        // 直接从数据库查状态为 0 (Pending) 的记录
-        List<DisputeRecordEntity> list = disputeRecordMapper.selectList(
-                new QueryWrapper<DisputeRecordEntity>().eq("proposal_status", 0)
+        return disputeRecordMapper.selectList(
+                new QueryWrapper<DisputeRecordEntity>()
+                        .in("proposal_status", 0,1)
+                        .isNotNull("proposal_id")
+                        .orderByDesc("create_time")
         );
-        return list;
     }
 
     @Override
     public List<DisputeRecordEntity> getHistoryProposals() {
-        // 直接从数据库查状态为 1 (Executed) 或 2 (Rejected) 的记录
-        List<DisputeRecordEntity> list = disputeRecordMapper.selectList(
+        return disputeRecordMapper.selectList(
                 new QueryWrapper<DisputeRecordEntity>()
-                        .in("proposal_status", 1, 2)
-                        .orderByDesc("update_time")
+                        .in("proposal_status", 2, 3, 4)
+                        .orderByDesc("create_time")
         );
-        return list;
     }
 
     private DisputeDTO convertToDTO(DisputeRecordEntity entity) {
         if (entity == null) return null;
 
         DisputeDTO dto = new DisputeDTO();
-        dto.setTradeId(entity.getTradeId());
+        dto.setChainTradeId(entity.getChainTradeId());
         dto.setProposalId(entity.getProposalId());
         dto.setInitiator(entity.getInitiator());
         dto.setAccused(entity.getAccused());
@@ -177,10 +210,10 @@ public class MultiSigWalletServiceImpl implements MultiSigWalletService {
         if (info == null) return null;
 
         DisputeDTO dto = new DisputeDTO();
-        dto.setTradeId(info.tradeId.toString());
+        dto.setChainTradeId(info.tradeId.toString());
         dto.setInitiator(info.accusedParty);
         dto.setAccused(info.victimParty);
-        dto.setCompensationAmount(new BigDecimal(info.getCompensationAmount()));
+        dto.setCompensationAmount(new BigDecimal(info.compensationAmount).divide(new BigDecimal("1000000"), 6, BigDecimal.ROUND_HALF_UP));
         dto.setReason(info.reason);
         dto.setStatus(info.status);
 

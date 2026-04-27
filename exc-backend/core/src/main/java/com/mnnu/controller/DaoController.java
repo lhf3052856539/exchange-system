@@ -10,6 +10,7 @@ import com.mnnu.service.MultiSigWalletService;
 import com.mnnu.vo.JsonVO;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
 
 import java.math.BigInteger;
@@ -21,11 +22,9 @@ import java.util.Map;
 @Slf4j
 @RestController
 @RequestMapping("/apis/dao")
-@RequiredArgsConstructor
 public class DaoController implements DaoApi {
-
-    private final DaoService daoService;
-    private final MultiSigWalletService multiSigWalletService;
+    @Autowired
+    private DaoService daoService;
 
 
     @Override

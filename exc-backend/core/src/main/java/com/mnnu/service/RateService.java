@@ -23,7 +23,7 @@ public interface RateService {
     AllRatesDTO getAllRates();
 
     /**
-     * 更新汇率（从预言机）
+     * 更新汇率
      */
     void updateRates();
 
